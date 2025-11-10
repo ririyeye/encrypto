@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Iterable, List, Sequence
 
 try:
-    from Crypto.Cipher import PKCS1_OAEP
+    from Crypto.Cipher import AES, PKCS1_OAEP
     from Crypto.Hash import SHA256
     from Crypto.PublicKey import RSA
 except ModuleNotFoundError as exc:  # pragma: no cover - guard for missing dependency
@@ -41,10 +41,9 @@ def run(command: Sequence[str], *, cwd: Path | None = None, env: dict | None = N
 
 def ensure_built(repo_root: Path, targets: Sequence[str]) -> None:
     if not targets:
-        run(["xmake", "build"], cwd=repo_root)
-    else:
-        for target in targets:
-            run(["xmake", "build", target], cwd=repo_root)
+        return
+    for target in targets:
+        run(["xmake", "build", target], cwd=repo_root)
 
 
 def resolve_target(repo_root: Path, name: str) -> Path:
@@ -118,6 +117,44 @@ def decrypt_python(private_key: RSA.RsaKey, key_len: int, ciphertext: bytes) -> 
     return b"".join(blocks)
 
 
+def read_hybrid_container(path: Path, private_key: RSA.RsaKey) -> tuple[bytes, bytes, bytes, bytes, bytes]:
+    header_len = 17
+    key_len = private_key.size_in_bytes()
+    with path.open("rb") as fp:
+        header_ct = fp.read(key_len)
+        if len(header_ct) != key_len:
+            raise AssertionError("Hybrid container missing encrypted header")
+        header = decrypt_python(private_key, key_len, header_ct)
+        if len(header) != header_len:
+            raise AssertionError("Decrypted header length mismatch")
+        if header[:4] != b"ENHY":
+            raise AssertionError("Invalid hybrid magic")
+        if header[4] != 1:
+            raise AssertionError(f"Unsupported hybrid version {header[4]}")
+        rsa_len = int.from_bytes(header[5:7], "big")
+        iv_len = header[7]
+        tag_len = header[8]
+        cipher_len = int.from_bytes(header[9:17], "big")
+        if rsa_len != key_len:
+            raise AssertionError("RSA ciphertext length mismatch in header")
+        rsa_ct = fp.read(rsa_len)
+        if len(rsa_ct) != rsa_len:
+            raise AssertionError("Incomplete RSA ciphertext in hybrid container")
+        iv = fp.read(iv_len)
+        if len(iv) != iv_len:
+            raise AssertionError("Incomplete IV in hybrid container")
+        ciphertext = fp.read(cipher_len)
+        if len(ciphertext) != cipher_len:
+            raise AssertionError("Incomplete ciphertext in hybrid container")
+        tag = fp.read(tag_len)
+        if len(tag) != tag_len:
+            raise AssertionError("Incomplete tag in hybrid container")
+        trailing = fp.read()
+        if trailing:
+            raise AssertionError("Unexpected trailing data in hybrid container")
+    return header, rsa_ct, iv, ciphertext, tag
+
+
 def run_cli(program: Path, src: Path, dst: Path, random_path: Path) -> None:
     env = os.environ.copy()
     env["ENCRYPTO_TEST_RANDOM_PATH"] = str(random_path)
@@ -134,12 +171,19 @@ def write_bytes(path: Path, data: bytes) -> None:
         fp.write(data)
 
 
-def execute_tests(repo_root: Path, sizes: Sequence[int]) -> None:
-    ensure_built(repo_root, ["rsa_encrypt", "rsa_decrypt"])
+def execute_tests(repo_root: Path, sizes: Sequence[int], *, run_rsa: bool, run_hybrid: bool) -> None:
+    targets: List[str] = []
+    if run_rsa:
+        targets.extend(["rsa_encrypt", "rsa_decrypt"])
+    if run_hybrid:
+        targets.extend(["hybrid_encrypt", "hybrid_decrypt"])
 
-    rsa_encrypt_path = resolve_target(repo_root, "rsa_encrypt")
-    rsa_decrypt_path = resolve_target(repo_root, "rsa_decrypt")
+    ensure_built(repo_root, targets)
 
+    rsa_encrypt_path: Path | None = resolve_target(repo_root, "rsa_encrypt") if run_rsa else None
+    rsa_decrypt_path: Path | None = resolve_target(repo_root, "rsa_decrypt") if run_rsa else None
+    hybrid_encrypt_path: Path | None = resolve_target(repo_root, "hybrid_encrypt") if run_hybrid else None
+    hybrid_decrypt_path: Path | None = resolve_target(repo_root, "hybrid_decrypt") if run_hybrid else None
     generated_dir = repo_root / "build" / "generated"
     priv_pem = generated_dir / "rsa_private.pem"
     pub_pem = generated_dir / "rsa_public.pem"
@@ -158,56 +202,103 @@ def execute_tests(repo_root: Path, sizes: Sequence[int]) -> None:
 
     with tempfile.TemporaryDirectory() as tmpdirname:
         tmpdir = Path(tmpdirname)
-        for size in sizes:
-            plaintext = os.urandom(size)
-            plain_path = tmpdir / f"plain_{size}.bin"
-            write_bytes(plain_path, plaintext)
+        if run_rsa:
+            for size in sizes:
+                plaintext = os.urandom(size)
+                plain_path = tmpdir / f"plain_{size}.bin"
+                write_bytes(plain_path, plaintext)
 
-            block_count = max(1, math.ceil(size / chunk_size))
-            # Provide ample deterministic bytes for OAEP seeds and RSA blinding entropy.
-            random_len = block_count * (hash_len + 4 * key_len)
-            random_bytes = os.urandom(random_len)
-            random_path = tmpdir / f"rand_{size}.bin"
-            write_bytes(random_path, random_bytes)
+                block_count = max(1, math.ceil(size / chunk_size))
+                random_len = block_count * (hash_len + 4 * key_len)
+                random_bytes = os.urandom(random_len)
+                random_path = tmpdir / f"rand_{size}.bin"
+                write_bytes(random_path, random_bytes)
 
-            cli_cipher_path = tmpdir / f"cli_{size}.bin"
-            run_cli(rsa_encrypt_path, plain_path, cli_cipher_path, random_path)
-            cli_ciphertext = load_bytes(cli_cipher_path)
+                cli_cipher_path = tmpdir / f"cli_{size}.bin"
+                run_cli(rsa_encrypt_path, plain_path, cli_cipher_path, random_path)
+                cli_ciphertext = load_bytes(cli_cipher_path)
 
-            py_ciphertext = encrypt_python(public_key, chunk_size, random_bytes, plaintext)
-            if cli_ciphertext != py_ciphertext:
-                raise AssertionError(f"Ciphertext mismatch for payload size {size}")
+                py_ciphertext = encrypt_python(public_key, chunk_size, random_bytes, plaintext)
+                if cli_ciphertext != py_ciphertext:
+                    raise AssertionError(f"Ciphertext mismatch for payload size {size}")
 
-            cli_roundtrip_path = tmpdir / f"cli_roundtrip_{size}.bin"
-            run_cli(rsa_decrypt_path, cli_cipher_path, cli_roundtrip_path, random_path)
-            cli_plain_roundtrip = load_bytes(cli_roundtrip_path)
-            if cli_plain_roundtrip != plaintext:
-                raise AssertionError(f"CLI round-trip mismatch for payload size {size}")
+                cli_roundtrip_path = tmpdir / f"cli_roundtrip_{size}.bin"
+                run_cli(rsa_decrypt_path, cli_cipher_path, cli_roundtrip_path, random_path)
+                cli_plain_roundtrip = load_bytes(cli_roundtrip_path)
+                if cli_plain_roundtrip != plaintext:
+                    raise AssertionError(f"CLI round-trip mismatch for payload size {size}")
 
-            py_plain = decrypt_python(private_key, key_len, cli_ciphertext)
-            if py_plain != plaintext:
-                raise AssertionError(f"Python decrypt mismatch for payload size {size}")
+                py_plain = decrypt_python(private_key, key_len, cli_ciphertext)
+                if py_plain != plaintext:
+                    raise AssertionError(f"Python decrypt mismatch for payload size {size}")
 
-            py_cipher_path = tmpdir / f"py_{size}.bin"
-            write_bytes(py_cipher_path, py_ciphertext)
-            cli_from_py_path = tmpdir / f"cli_from_py_{size}.bin"
-            run_cli(rsa_decrypt_path, py_cipher_path, cli_from_py_path, random_path)
-            if load_bytes(cli_from_py_path) != plaintext:
-                raise AssertionError(f"CLI decrypt of Python ciphertext failed for payload size {size}")
+                py_cipher_path = tmpdir / f"py_{size}.bin"
+                write_bytes(py_cipher_path, py_ciphertext)
+                cli_from_py_path = tmpdir / f"cli_from_py_{size}.bin"
+                run_cli(rsa_decrypt_path, py_cipher_path, cli_from_py_path, random_path)
+                if load_bytes(cli_from_py_path) != plaintext:
+                    raise AssertionError(f"CLI decrypt of Python ciphertext failed for payload size {size}")
 
-            print(f"[OK] processed payload of {size} bytes")
+                print(f"[OK] RSA processed payload of {size} bytes")
 
-    print(f"All {len(sizes)} cases passed")
+        if run_hybrid:
+            for size in sizes:
+                plaintext = os.urandom(size)
+                plain_path = tmpdir / f"hy_plain_{size}.bin"
+                write_bytes(plain_path, plaintext)
+
+                random_len = max(4 * key_len * 4, 1 << 16)
+                random_bytes = os.urandom(random_len)
+                random_path = tmpdir / f"hy_rand_{size}.bin"
+                write_bytes(random_path, random_bytes)
+
+                container_path = tmpdir / f"hy_enc_{size}.bin"
+                run_cli(hybrid_encrypt_path, plain_path, container_path, random_path)
+
+                header, rsa_ct, iv, ciphertext, tag = read_hybrid_container(container_path, private_key)
+                cipher_len_header = int.from_bytes(header[9:17], "big")
+                if cipher_len_header != len(ciphertext):
+                    raise AssertionError("Ciphertext length mismatch with header metadata")
+                session_key = decrypt_python(private_key, key_len, rsa_ct)
+                if len(session_key) != 32:
+                    raise AssertionError("Unexpected session key length from hybrid container")
+
+                aes = AES.new(session_key, AES.MODE_GCM, nonce=iv)
+                py_plain = aes.decrypt_and_verify(ciphertext, tag)
+                if py_plain != plaintext:
+                    raise AssertionError(f"Hybrid container mismatch for payload size {size}")
+
+                roundtrip_path = tmpdir / f"hy_roundtrip_{size}.bin"
+                run_cli(hybrid_decrypt_path, container_path, roundtrip_path, random_path)
+                if load_bytes(roundtrip_path) != plaintext:
+                    raise AssertionError(f"Hybrid decrypt mismatch for payload size {size}")
+
+                print(f"[OK] hybrid processed payload of {size} bytes")
+
+    if run_rsa:
+        print(f"All {len(sizes)} RSA cases passed")
+    if run_hybrid:
+        print(f"All {len(sizes)} hybrid cases passed")
 
 
 def main(argv: Sequence[str]) -> int:
-    parser = argparse.ArgumentParser(description="Test RSA CLI utilities")
+    parser = argparse.ArgumentParser(description="Test RSA and hybrid CLI utilities")
     parser.add_argument(
         "--sizes",
         metavar="N",
         type=int,
         nargs="*",
         help="List of payload sizes to test (default: 10B..10MB assortment)",
+    )
+    parser.add_argument(
+        "--rsa",
+        action="store_true",
+        help="Include pure RSA encrypt/decrypt CLI tests",
+    )
+    parser.add_argument(
+        "--no-hybrid",
+        action="store_true",
+        help="Skip hybrid encrypt/decrypt CLI tests",
     )
 
     args = parser.parse_args(argv)
@@ -228,7 +319,13 @@ def main(argv: Sequence[str]) -> int:
         ]
 
     repo_root = Path(__file__).resolve().parents[1]
-    execute_tests(repo_root, sizes)
+    run_hybrid = not args.no_hybrid
+    run_rsa = args.rsa
+
+    if not run_rsa and not run_hybrid:
+        parser.error("At least one of hybrid or RSA tests must be enabled")
+
+    execute_tests(repo_root, sizes, run_rsa=run_rsa, run_hybrid=run_hybrid)
     return 0
 
 

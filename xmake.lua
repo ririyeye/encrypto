@@ -68,3 +68,19 @@ target("rsa_decrypt")
     add_files("src/decrypt.c", "src/key_data.c")
     add_packages("mbedtls")
     add_includedirs("include", "$(builddir)/generated")
+
+
+target("hybrid_encrypt")
+    set_kind("binary")
+    add_deps("keys")
+    add_files("src/hybrid_encrypt.c", "src/key_data.c")
+    add_packages("mbedtls")
+    add_includedirs("include", "$(builddir)/generated")
+
+
+target("hybrid_decrypt")
+    set_kind("binary")
+    add_deps("keys")
+    add_files("src/hybrid_decrypt.c", "src/key_data.c")
+    add_packages("mbedtls")
+    add_includedirs("include", "$(builddir)/generated")

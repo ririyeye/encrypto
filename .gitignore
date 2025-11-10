@@ -5,3 +5,6 @@ old-rule
 compile_commands.json
 .vscode
 .clang-format
+install
+.github
+*.bin
