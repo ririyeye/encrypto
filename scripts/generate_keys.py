@@ -18,12 +18,15 @@ LOCK_FILENAME = ".keygen.lock"
 LOCK_SLEEP_SECONDS = 0.1
 
 try:
-    from Crypto.PublicKey import RSA
-except ModuleNotFoundError as exc:  # pragma: no cover - dependency guard
-    print("error: missing dependency 'pycryptodome'", file=sys.stderr)
-    print(f"import failure: {exc}", file=sys.stderr)
-    print("hint: pip install pycryptodome", file=sys.stderr)
-    sys.exit(1)
+    from Crypto.PublicKey import RSA  # Debian/Ubuntu pip 命名
+except ModuleNotFoundError:
+    try:
+        from Cryptodome.PublicKey import RSA  # 部分发行版仅暴露此命名空间
+    except ModuleNotFoundError as exc:  # pragma: no cover - dependency guard
+        print("error: missing dependency 'pycryptodome'", file=sys.stderr)
+        print(f"import failure: {exc}", file=sys.stderr)
+        print("hint: pip install pycryptodome", file=sys.stderr)
+        sys.exit(1)
 
 
 def _ensure_parent(path: str) -> None:
