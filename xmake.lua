@@ -5,6 +5,7 @@ add_rules("mode.debug", "mode.release")
 
 add_requires("mbedtls", {configs = {shared = false}})
 add_rules("plugin.compile_commands.autoupdate")
+set_policy("build.optimization.lto", true)
 
 rule("generate_keys")
     on_load(function (target)
