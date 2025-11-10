@@ -6,16 +6,11 @@ PEM path, and the corresponding header destinations. Keys are regenerated on
 every invocation using PyCryptodome (no external executables required).
 """
 
-import errno
 import os
 import sys
-import time
 
 KEY_BITS = 4096
 PUBLIC_EXPONENT = 65537
-
-LOCK_FILENAME = ".keygen.lock"
-LOCK_SLEEP_SECONDS = 0.1
 
 try:
     from Crypto.PublicKey import RSA  # Debian/Ubuntu pip 命名
@@ -73,38 +68,6 @@ def _generate_rsa_keypair() -> tuple[bytes, bytes]:
     return private_pem, public_pem
 
 
-def _artifacts_ready(*paths: str) -> bool:
-    return all(os.path.isfile(path) and os.path.getsize(path) > 0 for path in paths)
-
-
-def _acquire_lock(lock_path: str) -> int:
-    _ensure_parent(lock_path)
-    while True:
-        try:
-            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
-            time.sleep(LOCK_SLEEP_SECONDS)
-            continue
-        except OSError as exc:  # pragma: no cover - defensive path
-            if exc.errno == errno.EEXIST:
-                time.sleep(LOCK_SLEEP_SECONDS)
-                continue
-            raise
-        else:
-            os.write(fd, f"pid={os.getpid()}".encode("ascii"))
-            return fd
-
-
-def _release_lock(fd: int, lock_path: str) -> None:
-    try:
-        os.close(fd)
-    finally:
-        try:
-            os.remove(lock_path)
-        except FileNotFoundError:
-            pass
-
-
 def main() -> int:
     if len(sys.argv) != 5:
         print(
@@ -123,23 +86,15 @@ def main() -> int:
     for path in (priv_header, pub_header):
         _ensure_parent(path)
 
-    lock_path = os.path.join(os.path.dirname(os.path.abspath(priv_path)), LOCK_FILENAME)
-    lock_fd = _acquire_lock(lock_path)
-    try:
-        if _artifacts_ready(priv_path, pub_path, priv_header, pub_header):
-            return 0
+    private_pem, public_pem = _generate_rsa_keypair()
 
-        private_pem, public_pem = _generate_rsa_keypair()
+    with open(priv_path, "wb") as fp:
+        fp.write(private_pem)
+    with open(pub_path, "wb") as fp:
+        fp.write(public_pem)
 
-        with open(priv_path, "wb") as fp:
-            fp.write(private_pem)
-        with open(pub_path, "wb") as fp:
-            fp.write(public_pem)
-
-        _write_header_bytes(private_pem, priv_header, "g_rsa_private_key")
-        _write_header_bytes(public_pem, pub_header, "g_rsa_public_key")
-    finally:
-        _release_lock(lock_fd, lock_path)
+    _write_header_bytes(private_pem, priv_header, "g_rsa_private_key")
+    _write_header_bytes(public_pem, pub_header, "g_rsa_public_key")
 
     return 0
 
