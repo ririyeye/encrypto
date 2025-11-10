@@ -32,6 +32,20 @@ rule("generate_keys")
         local public_header = path.join(gen_dir, "rsa_public_key.h")
 
         if os.isfile(private_pem) and os.isfile(public_pem) and os.isfile(private_header) and os.isfile(public_header) then
+            os.setenv("ENCRYPTO_KEYGEN_STATE", "done")
+            return
+        end
+
+        local state = os.getenv("ENCRYPTO_KEYGEN_STATE")
+        if state == "running" then
+            while os.getenv("ENCRYPTO_KEYGEN_STATE") == "running" do
+                os.sleep(100)
+            end
+            if os.isfile(private_pem) and os.isfile(public_pem) and os.isfile(private_header) and os.isfile(public_header) then
+                os.setenv("ENCRYPTO_KEYGEN_STATE", "done")
+                return
+            end
+        elseif state == "done" then
             return
         end
 
@@ -44,7 +58,9 @@ rule("generate_keys")
         end
         assert(python_prog, "python interpreter not found; set PYTHON env var or install python3")
 
+        os.setenv("ENCRYPTO_KEYGEN_STATE", "running")
         os.vrunv(python_prog, {script_path, private_pem, public_pem, private_header, public_header})
+        os.setenv("ENCRYPTO_KEYGEN_STATE", "done")
     end)
 
 rule_end()
