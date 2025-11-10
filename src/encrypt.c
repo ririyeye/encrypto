@@ -1,60 +1,142 @@
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "mbedtls/pk.h"
-#include "mbedtls/rsa.h"
 #include "mbedtls/ctr_drbg.h"
 #include "mbedtls/entropy.h"
-#include "mbedtls/md.h"
 #include "mbedtls/error.h"
+#include "mbedtls/md.h"
+#include "mbedtls/pk.h"
+#include "mbedtls/rsa.h"
 
 #include "key_data.h"
 
-static void print_mbedtls_error(const char *label, int code)
+typedef struct random_stream {
+    unsigned char* data;
+    size_t         length;
+    size_t         offset;
+} random_stream;
+
+static int random_stream_load(const char* path, random_stream* stream)
+{
+    FILE* fp = fopen(path, "rb");
+    if (!fp) {
+        fprintf(stderr, "Failed to open deterministic random source '%s': %s\n", path, strerror(errno));
+        return -1;
+    }
+
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        fprintf(stderr, "Failed to seek deterministic random source '%s'\n", path);
+        fclose(fp);
+        return -1;
+    }
+
+    long size = ftell(fp);
+    if (size < 0) {
+        fprintf(stderr, "Failed to determine size of deterministic random source '%s'\n", path);
+        fclose(fp);
+        return -1;
+    }
+    if (fseek(fp, 0, SEEK_SET) != 0) {
+        fprintf(stderr, "Failed to rewind deterministic random source '%s'\n", path);
+        fclose(fp);
+        return -1;
+    }
+
+    stream->data = (unsigned char*)malloc((size_t)size);
+    if (!stream->data) {
+        fprintf(stderr, "Out of memory loading deterministic random source\n");
+        fclose(fp);
+        return -1;
+    }
+
+    if (fread(stream->data, 1, (size_t)size, fp) != (size_t)size) {
+        fprintf(stderr, "Failed to read deterministic random source '%s'\n", path);
+        free(stream->data);
+        stream->data = NULL;
+        fclose(fp);
+        return -1;
+    }
+
+    fclose(fp);
+
+    stream->length = (size_t)size;
+    stream->offset = 0;
+    return 0;
+}
+
+static void random_stream_unload(random_stream* stream)
+{
+    if (stream && stream->data) {
+        free(stream->data);
+        stream->data   = NULL;
+        stream->length = 0;
+        stream->offset = 0;
+    }
+}
+
+static int random_stream_func(void* ctx, unsigned char* out, size_t len)
+{
+    random_stream* stream = (random_stream*)ctx;
+    if (!stream || len == 0) {
+        return 0;
+    }
+    if (stream->offset + len > stream->length) {
+        return MBEDTLS_ERR_ENTROPY_SOURCE_FAILED;
+    }
+
+    memcpy(out, stream->data + stream->offset, len);
+    stream->offset += len;
+    return 0;
+}
+
+static void print_mbedtls_error(const char* label, int code)
 {
     char buffer[256];
     mbedtls_strerror(code, buffer, sizeof(buffer));
     fprintf(stderr, "%s: %s\n", label, buffer);
 }
 
-int main(int argc, char **argv)
+int main(int argc, char** argv)
 {
     if (argc != 3) {
         fprintf(stderr, "Usage: %s <input> <output>\n", argv[0]);
         return 1;
     }
 
-    const char *input_path = argv[1];
-    const char *output_path = argv[2];
+    const char* input_path  = argv[1];
+    const char* output_path = argv[2];
 
-    FILE *fin = fopen(input_path, "rb");
+    FILE* fin = fopen(input_path, "rb");
     if (!fin) {
         perror("Failed to open input file");
         return 1;
     }
 
-    FILE *fout = fopen(output_path, "wb");
+    FILE* fout = fopen(output_path, "wb");
     if (!fout) {
         perror("Failed to open output file");
         fclose(fin);
         return 1;
     }
 
-    int ret = 1;
-    unsigned char *pub_buf = NULL;
-    unsigned char *in_buf = NULL;
-    unsigned char *out_buf = NULL;
-    mbedtls_entropy_context entropy;
+    int                      ret     = 1;
+    unsigned char*           pub_buf = NULL;
+    unsigned char*           in_buf  = NULL;
+    unsigned char*           out_buf = NULL;
+    mbedtls_entropy_context  entropy;
     mbedtls_ctr_drbg_context ctr_drbg;
-    int entropy_ready = 0;
-    int ctr_drbg_ready = 0;
+    int                      entropy_ready         = 0;
+    int                      ctr_drbg_ready        = 0;
+    random_stream            deterministic_rng     = { 0 };
+    int                      use_deterministic_rng = 0;
 
     mbedtls_pk_context pk;
     mbedtls_pk_init(&pk);
 
     size_t pub_size = key_data_public_size();
-    pub_buf = (unsigned char *)malloc(pub_size + 1);
+    pub_buf         = (unsigned char*)malloc(pub_size + 1);
     if (!pub_buf) {
         fprintf(stderr, "Out of memory allocating public key buffer\n");
         goto cleanup;
@@ -73,16 +155,16 @@ int main(int argc, char **argv)
         goto cleanup;
     }
 
-    mbedtls_rsa_context *rsa = mbedtls_pk_rsa(pk);
+    mbedtls_rsa_context* rsa = mbedtls_pk_rsa(pk);
     mbedtls_rsa_set_padding(rsa, MBEDTLS_RSA_PKCS_V21, MBEDTLS_MD_SHA256);
 
-    const mbedtls_md_info_t *md_info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    const mbedtls_md_info_t* md_info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
     if (!md_info) {
         fprintf(stderr, "Failed to obtain hash info for OAEP padding\n");
         goto cleanup;
     }
-    size_t hash_len = mbedtls_md_get_size(md_info);
-    size_t key_len = mbedtls_rsa_get_len(rsa);
+    size_t hash_len   = mbedtls_md_get_size(md_info);
+    size_t key_len    = mbedtls_rsa_get_len(rsa);
     size_t chunk_size = key_len - 2 * hash_len - 2;
 
     if (chunk_size == 0) {
@@ -90,36 +172,48 @@ int main(int argc, char **argv)
         goto cleanup;
     }
 
-    in_buf = (unsigned char *)malloc(chunk_size);
-    out_buf = (unsigned char *)malloc(key_len);
+    in_buf  = (unsigned char*)malloc(chunk_size);
+    out_buf = (unsigned char*)malloc(key_len);
     if (!in_buf || !out_buf) {
         fprintf(stderr, "Out of memory allocating buffers\n");
         goto cleanup;
     }
 
-    mbedtls_entropy_init(&entropy);
-    entropy_ready = 1;
-    mbedtls_ctr_drbg_init(&ctr_drbg);
-    ctr_drbg_ready = 1;
+    const char* rng_path                           = getenv("ENCRYPTO_TEST_RANDOM_PATH");
+    int (*rng_func)(void*, unsigned char*, size_t) = NULL;
+    void* rng_ctx                                  = NULL;
 
-    const char *pers = "rsa_encrypt";
-    err = mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy,
-                                (const unsigned char *)pers, strlen(pers));
-    if (err != 0) {
-        print_mbedtls_error("Failed to seed RNG", err);
-        goto cleanup;
+    if (rng_path && rng_path[0] != '\0') {
+        if (random_stream_load(rng_path, &deterministic_rng) != 0) {
+            goto cleanup;
+        }
+        use_deterministic_rng = 1;
+        rng_func              = random_stream_func;
+        rng_ctx               = &deterministic_rng;
+    } else {
+        mbedtls_entropy_init(&entropy);
+        entropy_ready = 1;
+        mbedtls_ctr_drbg_init(&ctr_drbg);
+        ctr_drbg_ready = 1;
+
+        const char* pers = "rsa_encrypt";
+        err              = mbedtls_ctr_drbg_seed(&ctr_drbg,
+                                    mbedtls_entropy_func,
+                                    &entropy,
+                                    (const unsigned char*)pers,
+                                    strlen(pers));
+        if (err != 0) {
+            print_mbedtls_error("Failed to seed RNG", err);
+            goto cleanup;
+        }
+
+        rng_func = mbedtls_ctr_drbg_random;
+        rng_ctx  = &ctr_drbg;
     }
 
     size_t read_bytes;
     while ((read_bytes = fread(in_buf, 1, chunk_size, fin)) > 0) {
-        err = mbedtls_rsa_rsaes_oaep_encrypt(rsa,
-                             mbedtls_ctr_drbg_random,
-                             &ctr_drbg,
-                             NULL,
-                             0,
-                             read_bytes,
-                             in_buf,
-                             out_buf);
+        err = mbedtls_rsa_rsaes_oaep_encrypt(rsa, rng_func, rng_ctx, NULL, 0, read_bytes, in_buf, out_buf);
         if (err != 0) {
             print_mbedtls_error("RSA encryption failed", err);
             goto cleanup;
@@ -139,6 +233,9 @@ int main(int argc, char **argv)
     ret = 0;
 
 cleanup:
+    if (use_deterministic_rng) {
+        random_stream_unload(&deterministic_rng);
+    }
     if (ctr_drbg_ready) {
         mbedtls_ctr_drbg_free(&ctr_drbg);
     }

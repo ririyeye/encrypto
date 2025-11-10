@@ -1,3 +1,7 @@
 .xmake
 build
 old-rule
+.cache
+compile_commands.json
+.vscode
+.clang-format

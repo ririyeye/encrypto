@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-"""Generate RSA key pair PEM files for the build.
+"""Generate RSA key pair PEM and header files for the build.
 
-The script expects two arguments: the private key path and the public key path.
-OpenSSL must be available on PATH. Keys are regenerated on every invocation.
+The script expects four arguments: the private key PEM path, the public key
+PEM path, and the corresponding header destinations. OpenSSL must be available
+on PATH. Keys are regenerated on every invocation.
 """
 
 import os
 import shutil
 import subprocess
 import sys
-from typing import List
-
 KEY_BITS = 2048
 PUBLIC_EXPONENT = 65537
 
@@ -21,7 +20,7 @@ def _ensure_parent(path: str) -> None:
         os.makedirs(directory, exist_ok=True)
 
 
-def _run(cmd: List[str], desc: str) -> None:
+def _run(cmd, desc: str) -> None:
     try:
         subprocess.run(cmd, check=True)
     except FileNotFoundError:
@@ -68,7 +67,10 @@ def _write_header(pem_path: str, header_path: str, symbol: str) -> None:
 
 def main() -> int:
     if len(sys.argv) != 5:
-        print(f"usage: {sys.argv[0]} <private.pem> <public.pem> <private.h> <public.h>", file=sys.stderr)
+        print(
+            f"usage: {sys.argv[0]} <private.pem> <public.pem> <private.h> <public.h>",
+            file=sys.stderr,
+        )
         return 1
 
     priv_path = sys.argv[1]

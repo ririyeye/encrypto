@@ -4,7 +4,7 @@ set_languages("c99")
 add_rules("mode.debug", "mode.release")
 
 add_requires("mbedtls", {configs = {shared = false}})
-
+add_rules("plugin.compile_commands.autoupdate")
 
 rule("generate_keys")
     on_load(function (target)
@@ -20,8 +20,6 @@ rule("generate_keys")
     end)
 
     before_build(function (target)
-        import("core.base.option")
-        import("core.project.depend")
         local find_program = import("lib.detect.find_program")
 
         local gen_dir = target:data("generated_dir")
