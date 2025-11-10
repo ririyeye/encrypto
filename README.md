@@ -1,0 +1,7 @@
+# encrypto
+
+## Building
+
+```bash
+xmake
+```
