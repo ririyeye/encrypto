@@ -131,24 +131,68 @@ static void store_u64_be(unsigned char* dst, uint64_t value)
 int main(int argc, char** argv)
 {
     if (argc != 3) {
-        fprintf(stderr, "Usage: %s <input> <output>\n", argv[0]);
+        fprintf(stderr, "Usage: %s <input|-> <output|->\n", argv[0]);
         return 1;
     }
 
     const char* input_path  = argv[1];
     const char* output_path = argv[2];
 
-    FILE* fin = fopen(input_path, "rb");
-    if (!fin) {
-        perror("Failed to open input file");
-        return 1;
+    FILE* fin             = NULL;
+    FILE* fout            = NULL;
+    FILE* payload_stream  = NULL;
+    FILE* payload_tmp     = NULL;
+    int   close_input     = 0;
+    int   close_output    = 0;
+    int   using_spool     = 0;
+    int   output_seekable = 0;
+
+    if (strcmp(input_path, "-") == 0) {
+        fin = stdin;
+    } else {
+        fin = fopen(input_path, "rb");
+        if (!fin) {
+            perror("Failed to open input file");
+            return 1;
+        }
+        close_input = 1;
     }
 
-    FILE* fout = fopen(output_path, "wb+");
-    if (!fout) {
-        perror("Failed to open output file");
-        fclose(fin);
-        return 1;
+    if (strcmp(output_path, "-") == 0) {
+        fout = stdout;
+    } else {
+        fout = fopen(output_path, "wb+");
+        if (!fout) {
+            perror("Failed to open output file");
+            if (close_input) {
+                fclose(fin);
+            }
+            return 1;
+        }
+        close_output = 1;
+    }
+
+    if (fout != stdout && fseek(fout, 0, SEEK_CUR) == 0) {
+        output_seekable = 1;
+    }
+
+    if (!output_seekable) {
+        // Buffer payload when output stream cannot be rewound (e.g. stdout or a pipe).
+        payload_tmp = tmpfile();
+        if (!payload_tmp) {
+            perror("Failed to create temporary payload buffer");
+            if (close_output) {
+                fclose(fout);
+            }
+            if (close_input) {
+                fclose(fin);
+            }
+            return 1;
+        }
+        payload_stream = payload_tmp;
+        using_spool    = 1;
+    } else {
+        payload_stream = fout;
     }
 
     int                      ret       = 1;
@@ -289,9 +333,12 @@ int main(int argc, char** argv)
         goto cleanup;
     }
 
-    if (fwrite(header_ct, 1, key_len, fout) != key_len) {
-        perror("Failed to reserve encrypted header space");
-        goto cleanup;
+    if (output_seekable) {
+        memset(header_ct, 0, key_len);
+        if (fwrite(header_ct, 1, key_len, fout) != key_len) {
+            perror("Failed to reserve encrypted header space");
+            goto cleanup;
+        }
     }
 
     memset(header, 0, sizeof(header));
@@ -302,12 +349,12 @@ int main(int argc, char** argv)
     header[8] = (unsigned char)tag_len;
     store_u64_be(&header[9], 0);
 
-    if (fwrite(rsa_ct, 1, key_len, fout) != key_len) {
+    if (fwrite(rsa_ct, 1, key_len, payload_stream) != key_len) {
         perror("Failed to write RSA ciphertext");
         goto cleanup;
     }
 
-    if (fwrite(iv, 1, iv_len, fout) != iv_len) {
+    if (fwrite(iv, 1, iv_len, payload_stream) != iv_len) {
         perror("Failed to write IV");
         goto cleanup;
     }
@@ -327,7 +374,7 @@ int main(int argc, char** argv)
             goto cleanup;
         }
 
-        if (fwrite(out_buf, 1, produced, fout) != produced) {
+        if (fwrite(out_buf, 1, produced, payload_stream) != produced) {
             perror("Failed to write ciphertext");
             goto cleanup;
         }
@@ -348,14 +395,14 @@ int main(int argc, char** argv)
     }
 
     if (final_len > 0) {
-        if (fwrite(final_block, 1, final_len, fout) != final_len) {
+        if (fwrite(final_block, 1, final_len, payload_stream) != final_len) {
             perror("Failed to write final ciphertext bytes");
             goto cleanup;
         }
         total_written += final_len;
     }
 
-    if (fwrite(tag, 1, tag_len, fout) != tag_len) {
+    if (fwrite(tag, 1, tag_len, payload_stream) != tag_len) {
         perror("Failed to write authentication tag");
         goto cleanup;
     }
@@ -367,14 +414,44 @@ int main(int argc, char** argv)
         goto cleanup;
     }
 
-    if (fseek(fout, 0, SEEK_SET) != 0) {
-        perror("Failed to seek for header rewrite");
-        goto cleanup;
+    if (using_spool) {
+        if (fflush(payload_stream) != 0) {
+            perror("Failed to flush payload buffer");
+            goto cleanup;
+        }
+        if (fwrite(header_ct, 1, key_len, fout) != key_len) {
+            perror("Failed to write encrypted header");
+            goto cleanup;
+        }
+        if (fflush(fout) != 0) {
+            perror("Failed to flush output file");
+            goto cleanup;
+        }
+        if (fseek(payload_stream, 0, SEEK_SET) != 0) {
+            perror("Failed to rewind payload buffer");
+            goto cleanup;
+        }
+        while ((read_bytes = fread(out_buf, 1, chunk_size, payload_stream)) > 0) {
+            if (fwrite(out_buf, 1, read_bytes, fout) != read_bytes) {
+                perror("Failed to stream ciphertext");
+                goto cleanup;
+            }
+        }
+        if (ferror(payload_stream)) {
+            fprintf(stderr, "Failed to read buffered payload\n");
+            goto cleanup;
+        }
+    } else {
+        if (fseek(fout, 0, SEEK_SET) != 0) {
+            perror("Failed to seek for header rewrite");
+            goto cleanup;
+        }
+        if (fwrite(header_ct, 1, key_len, fout) != key_len) {
+            perror("Failed to write encrypted header");
+            goto cleanup;
+        }
     }
-    if (fwrite(header_ct, 1, key_len, fout) != key_len) {
-        perror("Failed to write encrypted header");
-        goto cleanup;
-    }
+
     if (fflush(fout) != 0) {
         perror("Failed to flush output file");
         goto cleanup;
@@ -403,6 +480,9 @@ cleanup:
 
     free(in_buf);
     free(out_buf);
+    if (payload_tmp) {
+        fclose(payload_tmp);
+    }
     free(pub_buf);
     free(rsa_ct);
     free(header_ct);
@@ -419,14 +499,14 @@ cleanup:
     mbedtls_gcm_free(&gcm);
     mbedtls_pk_free(&pk);
 
-    if (fout) {
+    if (close_output && fout) {
         fclose(fout);
     }
-    if (fin) {
+    if (close_input && fin) {
         fclose(fin);
     }
 
-    if (ret != 0) {
+    if (ret != 0 && close_output) {
         remove(output_path);
     }
 

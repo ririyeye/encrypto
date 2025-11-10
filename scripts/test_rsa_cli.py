@@ -20,13 +20,18 @@ try:
     from Crypto.Cipher import AES, PKCS1_OAEP
     from Crypto.Hash import SHA256
     from Crypto.PublicKey import RSA
-except ModuleNotFoundError as exc:  # pragma: no cover - guard for missing dependency
-    print(
-        "error: missing dependency 'pycryptodome' (import failed: %s)" % exc,
-        file=sys.stderr,
-    )
-    print("hint: pip install pycryptodome", file=sys.stderr)
-    sys.exit(1)
+except ModuleNotFoundError:
+    try:
+        from Cryptodome.Cipher import AES, PKCS1_OAEP
+        from Cryptodome.Hash import SHA256
+        from Cryptodome.PublicKey import RSA
+    except ModuleNotFoundError as exc:  # pragma: no cover - guard for missing dependency
+        print(
+            "error: missing dependency 'pycryptodome' (import failed: %s)" % exc,
+            file=sys.stderr,
+        )
+        print("hint: pip install pycryptodome", file=sys.stderr)
+        sys.exit(1)
 
 
 def run(command: Sequence[str], *, cwd: Path | None = None, env: dict | None = None) -> None:

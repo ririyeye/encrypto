@@ -120,24 +120,41 @@ static uint64_t load_u64_be(const unsigned char* src)
 int main(int argc, char** argv)
 {
     if (argc != 3) {
-        fprintf(stderr, "Usage: %s <input> <output>\n", argv[0]);
+        fprintf(stderr, "Usage: %s <input|-> <output|->\n", argv[0]);
         return 1;
     }
 
     const char* input_path  = argv[1];
     const char* output_path = argv[2];
 
-    FILE* fin = fopen(input_path, "rb");
-    if (!fin) {
-        perror("Failed to open input file");
-        return 1;
+    FILE* fin          = NULL;
+    FILE* fout         = NULL;
+    int   close_input  = 0;
+    int   close_output = 0;
+
+    if (strcmp(input_path, "-") == 0) {
+        fin = stdin;
+    } else {
+        fin = fopen(input_path, "rb");
+        if (!fin) {
+            perror("Failed to open input file");
+            return 1;
+        }
+        close_input = 1;
     }
 
-    FILE* fout = fopen(output_path, "wb");
-    if (!fout) {
-        perror("Failed to open output file");
-        fclose(fin);
-        return 1;
+    if (strcmp(output_path, "-") == 0) {
+        fout = stdout;
+    } else {
+        fout = fopen(output_path, "wb");
+        if (!fout) {
+            perror("Failed to open output file");
+            if (close_input) {
+                fclose(fin);
+            }
+            return 1;
+        }
+        close_output = 1;
     }
 
     int                      ret        = 1;
@@ -443,14 +460,14 @@ cleanup:
     mbedtls_gcm_free(&gcm);
     mbedtls_pk_free(&pk);
 
-    if (fout) {
+    if (close_output && fout) {
         fclose(fout);
     }
-    if (fin) {
+    if (close_input && fin) {
         fclose(fin);
     }
 
-    if (ret != 0) {
+    if (ret != 0 && close_output) {
         remove(output_path);
     }
 
