@@ -49,14 +49,9 @@ rule("generate_keys")
 
 rule_end()
 
-target("keys")
-    set_kind("phony")
-    add_rules("generate_keys")
-
-
 target("hybrid_encrypt")
     set_kind("binary")
-    add_deps("keys")
+    add_rules("generate_keys")
     add_files("src/hybrid_encrypt.c", "src/key_data.c")
     add_packages("mbedtls")
     add_includedirs("include", "$(builddir)/generated")
@@ -64,7 +59,7 @@ target("hybrid_encrypt")
 
 target("hybrid_decrypt")
     set_kind("binary")
-    add_deps("keys")
+    add_rules("generate_keys")
     add_files("src/hybrid_decrypt.c", "src/key_data.c")
     add_packages("mbedtls")
     add_includedirs("include", "$(builddir)/generated")

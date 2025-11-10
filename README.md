@@ -7,12 +7,15 @@
 ## 先决条件
 
 - 安装 [xmake](https://xmake.io/)。
-- PATH 中需要 `openssl`，以便构建时自动生成密钥材料。
-- Python 环境需可运行仓库根目录下的脚本；如使用虚拟环境，请在调用脚本前激活。
+- Python 环境需可运行仓库根目录下的脚本，并已安装 [PyCryptodome](https://pycryptodome.readthedocs.io/)；如使用虚拟环境，请在调用脚本前激活。
+
+```bash
+python -m pip install pycryptodome
+```
 
 ## 构建
 
-执行下列任意命令都会触发自定义 `generate_keys` 规则，从而调用 `scripts/generate_keys.py` 生成 PEM 与 `build/generated/` 下的 `rsa_private_key.h`、`rsa_public_key.h`：
+执行下列任意命令都会触发自定义 `generate_keys` 规则，从而调用 `scripts/generate_keys.py` 利用 PyCryptodome 生成 PEM 与 `build/generated/` 下的 `rsa_private_key.h`、`rsa_public_key.h`：
 
 ```bash
 xmake            # 构建所有目标

@@ -9,6 +9,7 @@ stable across runs.
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -45,11 +46,20 @@ def ensure_built(repo_root: Path, targets: Sequence[str]) -> None:
         run(["xmake", "build", target], cwd=repo_root)
 
 
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_ESCAPE.sub("", text)
+
+
 def resolve_target(repo_root: Path, name: str) -> Path:
     output = subprocess.check_output(["xmake", "show", "-t", name], cwd=repo_root)
-    for line in output.decode().splitlines():
-        stripped = line.strip()
-        if stripped.startswith("targetfile"):
+    decoded = output.decode(errors="ignore")
+    for raw_line in decoded.splitlines():
+        stripped = _strip_ansi(raw_line).strip()
+        lowered = stripped.lower()
+        if lowered.startswith("targetfile") or "targetfile" in lowered:
             path = ""
             for sep in (":", "："):
                 if sep in stripped:
@@ -61,11 +71,23 @@ def resolve_target(repo_root: Path, name: str) -> Path:
             if not target_path.is_absolute():
                 target_path = repo_root / target_path
             return target_path.resolve()
-    # Fallback: search under build directory for the expected binary name.
+        # Handle potential localized key (e.g., Chinese "目标文件").
+        clean_line = stripped.replace("\x00", "")
+        if "目标文件" in clean_line:
+            path = clean_line.split("目标文件", 1)[1].strip(" ：:")
+            if path:
+                target_path = Path(path)
+                if not target_path.is_absolute():
+                    target_path = repo_root / target_path
+                return target_path.resolve()
+
     build_root = repo_root / "build"
     if build_root.exists():
-        for candidate in build_root.rglob(name):
-            if candidate.is_file() or candidate.is_symlink():
+        expected_names = {name, f"{name}.exe", f"{name}.dll"}
+        for candidate in build_root.rglob("*"):
+            if not (candidate.is_file() or candidate.is_symlink()):
+                continue
+            if candidate.name in expected_names:
                 return candidate.resolve()
     raise SystemExit(f"Unable to determine target path for {name}")
 
@@ -125,7 +147,10 @@ def read_hybrid_container(path: Path, private_key: RSA.RsaKey) -> tuple[bytes, b
 def run_cli(program: Path, src: Path, dst: Path, random_path: Path) -> None:
     env = os.environ.copy()
     env["ENCRYPTO_TEST_RANDOM_PATH"] = str(random_path)
-    run([str(program), str(src), str(dst)], env=env)
+    program_path = Path(program)
+    if not program_path.exists():
+        raise SystemExit(f"Executable not found: {program_path}")
+    run([str(program_path), str(src), str(dst)], env=env)
 
 
 def load_bytes(path: Path) -> bytes:

@@ -2,16 +2,23 @@
 """Generate RSA key pair PEM and header files for the build.
 
 The script expects four arguments: the private key PEM path, the public key
-PEM path, and the corresponding header destinations. OpenSSL must be available
-on PATH. Keys are regenerated on every invocation.
+PEM path, and the corresponding header destinations. Keys are regenerated on
+every invocation using PyCryptodome (no external executables required).
 """
 
 import os
-import shutil
-import subprocess
 import sys
+
 KEY_BITS = 4096
 PUBLIC_EXPONENT = 65537
+
+try:
+    from Crypto.PublicKey import RSA
+except ModuleNotFoundError as exc:  # pragma: no cover - dependency guard
+    print("error: missing dependency 'pycryptodome'", file=sys.stderr)
+    print(f"import failure: {exc}", file=sys.stderr)
+    print("hint: pip install pycryptodome", file=sys.stderr)
+    sys.exit(1)
 
 
 def _ensure_parent(path: str) -> None:
@@ -20,21 +27,7 @@ def _ensure_parent(path: str) -> None:
         os.makedirs(directory, exist_ok=True)
 
 
-def _run(cmd, desc: str) -> None:
-    try:
-        subprocess.run(cmd, check=True)
-    except FileNotFoundError:
-        print(f"error: {cmd[0]} not found while attempting to {desc}", file=sys.stderr)
-        sys.exit(1)
-    except subprocess.CalledProcessError as exc:
-        print(f"error: {desc} failed with exit code {exc.returncode}", file=sys.stderr)
-        sys.exit(exc.returncode)
-
-
-def _write_header(pem_path: str, header_path: str, symbol: str) -> None:
-    with open(pem_path, "rb") as fp:
-        data = fp.read()
-
+def _write_header_bytes(data: bytes, header_path: str, symbol: str) -> None:
     guard = symbol.upper().replace("/", "_").replace(".", "_") + "_H"
     lines = [
         f"#ifndef {guard}",
@@ -47,12 +40,12 @@ def _write_header(pem_path: str, header_path: str, symbol: str) -> None:
     for idx, byte in enumerate(data, start=1):
         line += f"0x{byte:02X},"
         if idx % 12 == 0:
-            lines.append(line)
+            lines.append(line.rstrip())
             line = "    "
         else:
             line += " "
     if line.strip():
-        lines.append(line)
+        lines.append(line.rstrip())
 
     lines.extend([
         "};",
@@ -63,6 +56,13 @@ def _write_header(pem_path: str, header_path: str, symbol: str) -> None:
 
     with open(header_path, "w", encoding="ascii") as fp:
         fp.write("\n".join(lines))
+
+
+def _generate_rsa_keypair() -> tuple[bytes, bytes]:
+    key = RSA.generate(KEY_BITS, e=PUBLIC_EXPONENT)
+    private_pem = key.export_key(format="PEM")
+    public_pem = key.public_key().export_key(format="PEM")
+    return private_pem, public_pem
 
 
 def main() -> int:
@@ -83,42 +83,15 @@ def main() -> int:
     for path in (priv_header, pub_header):
         _ensure_parent(path)
 
-    openssl = shutil.which("openssl")
-    if not openssl:
-        print("error: openssl executable not found in PATH", file=sys.stderr)
-        return 1
+    private_pem, public_pem = _generate_rsa_keypair()
 
-    _run(
-        [
-            openssl,
-            "genpkey",
-            "-algorithm",
-            "RSA",
-            "-pkeyopt",
-            f"rsa_keygen_bits:{KEY_BITS}",
-            "-pkeyopt",
-            f"rsa_keygen_pubexp:{PUBLIC_EXPONENT}",
-            "-out",
-            priv_path,
-        ],
-        "generate RSA private key",
-    )
+    with open(priv_path, "wb") as fp:
+        fp.write(private_pem)
+    with open(pub_path, "wb") as fp:
+        fp.write(public_pem)
 
-    _run(
-        [
-            openssl,
-            "rsa",
-            "-pubout",
-            "-in",
-            priv_path,
-            "-out",
-            pub_path,
-        ],
-        "derive RSA public key",
-    )
-
-    _write_header(priv_path, priv_header, "g_rsa_private_key")
-    _write_header(pub_path, pub_header, "g_rsa_public_key")
+    _write_header_bytes(private_pem, priv_header, "g_rsa_private_key")
+    _write_header_bytes(public_pem, pub_header, "g_rsa_public_key")
 
     return 0
 
