@@ -54,22 +54,6 @@ target("keys")
     add_rules("generate_keys")
 
 
-target("rsa_encrypt")
-    set_kind("binary")
-    add_deps("keys")
-    add_files("src/encrypt.c", "src/key_data.c")
-    add_packages("mbedtls")
-    add_includedirs("include", "$(builddir)/generated")
-
-
-target("rsa_decrypt")
-    set_kind("binary")
-    add_deps("keys")
-    add_files("src/decrypt.c", "src/key_data.c")
-    add_packages("mbedtls")
-    add_includedirs("include", "$(builddir)/generated")
-
-
 target("hybrid_encrypt")
     set_kind("binary")
     add_deps("keys")
