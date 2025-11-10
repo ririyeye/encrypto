@@ -53,8 +53,7 @@ target("key_data")
     set_kind("static")
     add_rules("generate_keys")
     add_files("src/key_data.c")
-    add_includedirs("include", {public = true})
-    add_includedirs("$(builddir)/generated", {public = true})
+    add_includedirs("$(builddir)/generated")
 
 
 target("hybrid_encrypt")
