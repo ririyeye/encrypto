@@ -10,7 +10,7 @@ import os
 import shutil
 import subprocess
 import sys
-KEY_BITS = 2048
+KEY_BITS = 4096
 PUBLIC_EXPONENT = 65537
 
 
