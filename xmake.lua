@@ -12,7 +12,9 @@ add_requires("lz4", {configs = {shared = false}})
 add_requires("lzma", {configs = {shared = false}})
 add_rules("plugin.compile_commands.autoupdate")
 set_policy("build.optimization.lto", true)
-
+if is_plat("windows") then
+    set_runtimes("MT")
+end
 rule("generate_keys")
     on_load(function (target)
         local config = import("core.project.config")

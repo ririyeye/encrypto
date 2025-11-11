@@ -1,8 +1,9 @@
+#if !defined(_WIN32)
 #ifndef _XOPEN_SOURCE
 #define _XOPEN_SOURCE 700
 #endif
+#endif
 
-#include <dirent.h>
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -11,7 +12,21 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <time.h>
+
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include "win_dirent.h"
+#include <BaseTsd.h>
+#include <direct.h>
+#include <io.h>
+#include <process.h>
+#include <windows.h>
+
+typedef SSIZE_T ssize_t;
+#else
+#include <dirent.h>
 #include <unistd.h>
+#endif
 
 #include <archive.h>
 #include <archive_entry.h>
@@ -29,6 +44,30 @@
 #include "key_data.h"
 
 #define ENCRYPTO_STREAM_CHUNK (64 * 1024)
+
+#if defined(_WIN32)
+#ifndef S_ISDIR
+#define S_ISDIR(m) (((m) & _S_IFDIR) != 0)
+#endif
+#ifndef S_ISREG
+#define S_ISREG(m) (((m) & _S_IFREG) != 0)
+#endif
+#ifndef S_ISLNK
+#define S_ISLNK(m) 0
+#endif
+#ifndef S_ISCHR
+#define S_ISCHR(m) (((m) & _S_IFCHR) != 0)
+#endif
+#ifndef S_ISBLK
+#define S_ISBLK(m) 0
+#endif
+#ifndef S_ISFIFO
+#define S_ISFIFO(m) 0
+#endif
+#ifndef S_ISSOCK
+#define S_ISSOCK(m) 0
+#endif
+#endif
 
 typedef struct random_stream {
     unsigned char* data;
@@ -222,13 +261,53 @@ static char* string_dup(const char* src)
     return out;
 }
 
+static int is_path_separator(char ch)
+{
+#if defined(_WIN32)
+    return ch == '/' || ch == '\\';
+#else
+    return ch == '/';
+#endif
+}
+
+#if defined(_WIN32)
+static char* path_to_windows(const char* path)
+{
+    if (!path) {
+        return NULL;
+    }
+    char* converted = string_dup(path);
+    if (!converted) {
+        return NULL;
+    }
+    for (char* p = converted; *p != '\0'; ++p) {
+        if (*p == '/') {
+            *p = '\\';
+        }
+    }
+    return converted;
+}
+
+static void normalize_slashes(char* path)
+{
+    if (!path) {
+        return;
+    }
+    for (char* p = path; *p != '\0'; ++p) {
+        if (*p == '\\') {
+            *p = '/';
+        }
+    }
+}
+#endif
+
 static char* path_basename_dup(const char* path)
 {
     if (!path) {
         return NULL;
     }
     size_t len = strlen(path);
-    while (len > 0 && path[len - 1] == '/') {
+    while (len > 0 && is_path_separator(path[len - 1])) {
         len--;
     }
     if (len == 0) {
@@ -243,7 +322,7 @@ static char* path_basename_dup(const char* path)
     const char* end   = path + len;
     const char* start = path;
     for (const char* p = end; p != path; --p) {
-        if (*(p - 1) == '/') {
+        if (is_path_separator(*(p - 1))) {
             start = p;
             break;
         }
@@ -266,9 +345,12 @@ static char* path_join(const char* lhs, const char* rhs)
 {
     size_t lhs_len    = lhs ? strlen(lhs) : 0;
     size_t rhs_len    = rhs ? strlen(rhs) : 0;
-    size_t need_slash = (lhs_len > 0 && rhs_len > 0 && lhs[lhs_len - 1] != '/') ? 1 : 0;
-    size_t total      = lhs_len + need_slash + rhs_len + 1;
-    char*  out        = (char*)malloc(total);
+    size_t need_slash = 0;
+    if (lhs_len > 0 && rhs_len > 0 && !is_path_separator(lhs[lhs_len - 1])) {
+        need_slash = 1;
+    }
+    size_t total = lhs_len + need_slash + rhs_len + 1;
+    char*  out   = (char*)malloc(total);
     if (!out) {
         return NULL;
     }
@@ -293,15 +375,97 @@ static int path_exists(const char* path)
     if (!path) {
         return 0;
     }
+#if defined(_WIN32)
+    struct _stat64 st;
+    char*          win_path = path_to_windows(path);
+    if (!win_path) {
+        return 0;
+    }
+    int result = _stat64(win_path, &st);
+    int saved  = errno;
+    free(win_path);
+    errno = saved;
+    return result == 0;
+#else
     struct stat st;
     return stat(path, &st) == 0;
+#endif
 }
+
+#if defined(_WIN32)
+static int create_single_directory(const char* path)
+{
+    char* win_path = path_to_windows(path);
+    if (!win_path) {
+        errno = ENOMEM;
+        return -1;
+    }
+    int rc    = _mkdir(win_path);
+    int saved = errno;
+    free(win_path);
+    errno = saved;
+    return rc;
+}
+
+static int remove_single_directory(const char* path)
+{
+    char* win_path = path_to_windows(path);
+    if (!win_path) {
+        errno = ENOMEM;
+        return -1;
+    }
+    int rc    = _rmdir(win_path);
+    int saved = errno;
+    free(win_path);
+    errno = saved;
+    return rc;
+}
+
+static int remove_single_file(const char* path)
+{
+    char* win_path = path_to_windows(path);
+    if (!win_path) {
+        errno = ENOMEM;
+        return -1;
+    }
+    int rc    = _unlink(win_path);
+    int saved = errno;
+    free(win_path);
+    errno = saved;
+    return rc;
+}
+#else
+static int create_single_directory(const char* path)
+{
+    return mkdir(path, 0755);
+}
+
+static int remove_single_directory(const char* path)
+{
+    return rmdir(path);
+}
+
+static int remove_single_file(const char* path)
+{
+    return unlink(path);
+}
+#endif
 
 static unsigned int random_suffix_value(void)
 {
     static int          seeded = 0;
     static unsigned int state  = 0;
     if (!seeded) {
+#if defined(_WIN32)
+        unsigned int  seed = (unsigned int)_getpid();
+        LARGE_INTEGER counter;
+        if (QueryPerformanceCounter(&counter)) {
+            seed ^= (unsigned int)counter.LowPart;
+            seed ^= (unsigned int)counter.HighPart;
+        } else {
+            seed ^= (unsigned int)GetTickCount();
+        }
+#else
         unsigned int    seed = (unsigned int)getpid();
         struct timespec ts;
         if (clock_gettime(CLOCK_REALTIME, &ts) == 0) {
@@ -310,6 +474,7 @@ static unsigned int random_suffix_value(void)
         } else {
             seed ^= (unsigned int)time(NULL);
         }
+#endif
         srand(seed);
         state  = (unsigned int)rand();
         seeded = 1;
@@ -406,29 +571,61 @@ static int mkdir_recursive(const char* path)
         return -1;
     }
 
-    struct stat st;
-    if (stat(path, &st) == 0) {
-        errno = EEXIST;
-        return -1;
-    } else if (errno != ENOENT) {
-        return -1;
-    }
-
     char* mutable_path = string_dup(path);
     if (!mutable_path) {
         return -1;
     }
 
     size_t len = strlen(mutable_path);
-    while (len > 1 && mutable_path[len - 1] == '/') {
+    while (len > 1 && is_path_separator(mutable_path[len - 1])) {
         mutable_path[--len] = '\0';
     }
+
+#if defined(_WIN32)
+    normalize_slashes(mutable_path);
+
+    {
+        struct _stat64 st;
+        char*          win_path = path_to_windows(mutable_path);
+        if (!win_path) {
+            free(mutable_path);
+            return -1;
+        }
+        int stat_rc = _stat64(win_path, &st);
+        int saved   = errno;
+        free(win_path);
+        if (stat_rc == 0) {
+            free(mutable_path);
+            errno = EEXIST;
+            return -1;
+        }
+        if (saved != ENOENT) {
+            free(mutable_path);
+            errno = saved;
+            return -1;
+        }
+        errno = saved;
+    }
+#else
+    struct stat st;
+    if (stat(mutable_path, &st) == 0) {
+        free(mutable_path);
+        errno = EEXIST;
+        return -1;
+    }
+    if (errno != ENOENT) {
+        int saved = errno;
+        free(mutable_path);
+        errno = saved;
+        return -1;
+    }
+#endif
 
     for (size_t i = 1; i < len; ++i) {
         if (mutable_path[i] == '/') {
             mutable_path[i] = '\0';
             if (mutable_path[0] != '\0') {
-                if (mkdir(mutable_path, 0755) != 0 && errno != EEXIST) {
+                if (create_single_directory(mutable_path) != 0 && errno != EEXIST) {
                     free(mutable_path);
                     return -1;
                 }
@@ -437,7 +634,7 @@ static int mkdir_recursive(const char* path)
         }
     }
 
-    if (mkdir(mutable_path, 0755) != 0) {
+    if (create_single_directory(mutable_path) != 0) {
         int saved = errno;
         free(mutable_path);
         errno = saved;
@@ -454,6 +651,80 @@ static int remove_tree_quiet(const char* path)
         return 0;
     }
 
+#if defined(_WIN32)
+    char* win_path = path_to_windows(path);
+    if (!win_path) {
+        return -1;
+    }
+
+    struct _stat64 st;
+    int            stat_rc = _stat64(win_path, &st);
+    int            saved   = errno;
+    if (stat_rc != 0) {
+        free(win_path);
+        errno = saved;
+        return (saved == ENOENT) ? 0 : -1;
+    }
+
+    if ((st.st_mode & _S_IFDIR) != 0) {
+        size_t len     = strlen(win_path);
+        size_t add     = (len == 0 || (win_path[len - 1] != '\\' && win_path[len - 1] != '/')) ? 2 : 1;
+        char*  pattern = (char*)malloc(len + add + 1);
+        if (!pattern) {
+            free(win_path);
+            return -1;
+        }
+        memcpy(pattern, win_path, len);
+        if (add == 2) {
+            pattern[len++] = '\\';
+        }
+        pattern[len++] = '*';
+        pattern[len]   = '\0';
+
+        struct _finddata_t info;
+        intptr_t           handle = _findfirst(pattern, &info);
+        free(pattern);
+        if (handle != -1) {
+            do {
+                if (strcmp(info.name, ".") == 0 || strcmp(info.name, "..") == 0) {
+                    continue;
+                }
+                char* child = path_join(path, info.name);
+                if (!child) {
+                    _findclose(handle);
+                    free(win_path);
+                    return -1;
+                }
+                if (remove_tree_quiet(child) != 0) {
+                    free(child);
+                    _findclose(handle);
+                    free(win_path);
+                    return -1;
+                }
+                free(child);
+            } while (_findnext(handle, &info) == 0);
+            _findclose(handle);
+        }
+
+        if (remove_single_directory(path) != 0 && errno != ENOENT) {
+            int err_saved = errno;
+            free(win_path);
+            errno = err_saved;
+            return -1;
+        }
+        free(win_path);
+        return 0;
+    }
+
+    if (remove_single_file(path) != 0 && errno != ENOENT) {
+        int err_saved = errno;
+        free(win_path);
+        errno = err_saved;
+        return -1;
+    }
+    free(win_path);
+    return 0;
+#else
     struct stat st;
     if (lstat(path, &st) != 0) {
         return (errno == ENOENT) ? 0 : -1;
@@ -482,16 +753,17 @@ static int remove_tree_quiet(const char* path)
             free(child);
         }
         closedir(dir);
-        if (rmdir(path) != 0 && errno != ENOENT) {
+        if (remove_single_directory(path) != 0 && errno != ENOENT) {
             return -1;
         }
         return 0;
     }
 
-    if (unlink(path) != 0 && errno != ENOENT) {
+    if (remove_single_file(path) != 0 && errno != ENOENT) {
         return -1;
     }
     return 0;
+#endif
 }
 
 static int enable_reader_filter(struct archive* reader, compression_algorithm algorithm)

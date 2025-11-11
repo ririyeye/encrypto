@@ -1,9 +1,10 @@
+#if !defined(_WIN32)
 #ifndef _XOPEN_SOURCE
 #define _XOPEN_SOURCE 700
 #endif
+#endif
 
 #include <ctype.h>
-#include <dirent.h>
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -11,7 +12,21 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include "win_dirent.h"
+#include <BaseTsd.h>
+#include <direct.h>
+#include <io.h>
+#include <process.h>
+#include <windows.h>
+
+typedef SSIZE_T ssize_t;
+#define lstat(path, buf) stat(path, buf)
+#else
+#include <dirent.h>
 #include <unistd.h>
+#endif
 
 #include <archive.h>
 #include <archive_entry.h>
@@ -29,6 +44,30 @@
 #include "key_data.h"
 
 #define ENCRYPTO_STREAM_CHUNK (64 * 1024)
+
+#if defined(_WIN32)
+#ifndef S_ISDIR
+#define S_ISDIR(m) (((m) & _S_IFDIR) != 0)
+#endif
+#ifndef S_ISREG
+#define S_ISREG(m) (((m) & _S_IFREG) != 0)
+#endif
+#ifndef S_ISLNK
+#define S_ISLNK(m) 0
+#endif
+#ifndef S_ISCHR
+#define S_ISCHR(m) (((m) & _S_IFCHR) != 0)
+#endif
+#ifndef S_ISBLK
+#define S_ISBLK(m) 0
+#endif
+#ifndef S_ISFIFO
+#define S_ISFIFO(m) 0
+#endif
+#ifndef S_ISSOCK
+#define S_ISSOCK(m) 0
+#endif
+#endif
 
 typedef struct random_stream {
     unsigned char* data;
@@ -365,13 +404,22 @@ static int archive_close_cb(struct archive* ar, void* client_data)
     return ARCHIVE_OK;
 }
 
+static int is_path_separator(char ch)
+{
+#if defined(_WIN32)
+    return ch == '/' || ch == '\\';
+#else
+    return ch == '/';
+#endif
+}
+
 static char* path_basename_dup(const char* path)
 {
     if (!path) {
         return NULL;
     }
     size_t len = strlen(path);
-    while (len > 0 && path[len - 1] == '/') {
+    while (len > 0 && is_path_separator(path[len - 1])) {
         len--;
     }
     if (len == 0) {
@@ -386,7 +434,7 @@ static char* path_basename_dup(const char* path)
     const char* end   = path + len;
     const char* start = path;
     for (const char* p = end; p != path; --p) {
-        if (*(p - 1) == '/') {
+        if (is_path_separator(*(p - 1))) {
             start = p;
             break;
         }
@@ -410,7 +458,7 @@ static char* path_join(const char* lhs, const char* rhs)
     size_t lhs_len    = lhs ? strlen(lhs) : 0;
     size_t rhs_len    = rhs ? strlen(rhs) : 0;
     size_t need_slash = 0;
-    if (lhs_len > 0 && rhs_len > 0 && lhs[lhs_len - 1] != '/') {
+    if (lhs_len > 0 && rhs_len > 0 && !is_path_separator(lhs[lhs_len - 1])) {
         need_slash = 1;
     }
     size_t total = lhs_len + need_slash + rhs_len + 1;
@@ -481,6 +529,13 @@ static int archive_add_path(struct archive* archive,
     archive_entry_copy_stat(entry, &st);
     archive_entry_set_size(entry, S_ISREG(st.st_mode) ? st.st_size : 0);
 
+#if defined(_WIN32)
+    if (S_ISLNK(st.st_mode)) {
+        archive_entry_free(entry);
+        fprintf(stderr, "Symbolic links are not supported on this platform: '%s'\n", source_path);
+        return -1;
+    }
+#else
     if (S_ISLNK(st.st_mode)) {
         size_t target_len = st.st_size > 0 ? (size_t)st.st_size + 1 : 256;
         char*  target     = (char*)malloc(target_len);
@@ -500,6 +555,7 @@ static int archive_add_path(struct archive* archive,
         archive_entry_set_symlink(entry, target);
         free(target);
     }
+#endif
 
     int r = archive_write_header(archive, entry);
     if (r != ARCHIVE_OK) {
@@ -782,6 +838,7 @@ int main(int argc, char** argv)
     unsigned char*           in_buf    = NULL;
     unsigned char*           out_buf   = NULL;
     unsigned char*           patch_buf = NULL;
+    archive_gcm_sink         sink;
 
     mbedtls_pk_context pk;
     mbedtls_pk_init(&pk);
@@ -936,13 +993,14 @@ int main(int argc, char** argv)
         goto cleanup;
     }
 
-    archive_gcm_sink sink = { .gcm               = &gcm,
-                              .payload_stream    = payload_stream,
-                              .out_buf           = out_buf,
-                              .patch_buf         = patch_buf,
-                              .gzip_header_bytes = 0,
-                              .total_written     = 0,
-                              .compression_mode  = compression_mode };
+    memset(&sink, 0, sizeof(sink));
+    sink.gcm               = &gcm;
+    sink.payload_stream    = payload_stream;
+    sink.out_buf           = out_buf;
+    sink.patch_buf         = patch_buf;
+    sink.gzip_header_bytes = 0;
+    sink.total_written     = 0;
+    sink.compression_mode  = compression_mode;
 
     archive_writer = archive_write_new();
     if (!archive_writer) {
