@@ -1,8 +1,19 @@
+#ifndef _XOPEN_SOURCE
+#define _XOPEN_SOURCE 700
+#endif
+
+#include <dirent.h>
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+#include <archive.h>
+#include <archive_entry.h>
 
 #include "mbedtls/cipher.h"
 #include "mbedtls/ctr_drbg.h"
@@ -16,11 +27,15 @@
 
 #include "key_data.h"
 
+#define ENCRYPTO_STREAM_CHUNK (64 * 1024)
+
 typedef struct random_stream {
     unsigned char* data;
     size_t         length;
     size_t         offset;
 } random_stream;
+
+static void print_mbedtls_error(const char* label, int code);
 
 static int random_stream_load(const char* path, random_stream* stream)
 {
@@ -128,34 +143,374 @@ static void store_u64_be(unsigned char* dst, uint64_t value)
     }
 }
 
+typedef struct archive_gcm_sink {
+    mbedtls_gcm_context* gcm;
+    FILE*                payload_stream;
+    unsigned char*       out_buf;
+    unsigned char*       patch_buf;
+    size_t               gzip_header_bytes;
+    uint64_t             total_written;
+} archive_gcm_sink;
+
+static la_ssize_t archive_write_cb(struct archive* ar, void* client_data, const void* buffer, size_t length)
+{
+    (void)ar;
+    if (!client_data || !buffer || length == 0) {
+        return (la_ssize_t)length;
+    }
+
+    archive_gcm_sink* sink = (archive_gcm_sink*)client_data;
+
+    size_t offset = 0;
+    while (offset < length) {
+        size_t chunk = length - offset;
+        if (chunk > ENCRYPTO_STREAM_CHUNK) {
+            chunk = ENCRYPTO_STREAM_CHUNK;
+        }
+        const unsigned char* chunk_src = (const unsigned char*)buffer + offset;
+        if (sink->gzip_header_bytes < 10 && sink->patch_buf) {
+            memcpy(sink->patch_buf, chunk_src, chunk);
+            size_t remaining_header = 10 - sink->gzip_header_bytes;
+            if (remaining_header > chunk) {
+                remaining_header = chunk;
+            }
+            for (size_t i = 0; i < remaining_header; ++i) {
+                size_t global_pos = sink->gzip_header_bytes + i;
+                if (global_pos >= 4 && global_pos <= 7) {
+                    sink->patch_buf[i] = 0;
+                } else if (global_pos == 9) {
+                    sink->patch_buf[i] = 3;
+                }
+            }
+            chunk_src = sink->patch_buf;
+            sink->gzip_header_bytes += remaining_header;
+        }
+
+        size_t produced = 0;
+        int    err = mbedtls_gcm_update(sink->gcm, chunk_src, chunk, sink->out_buf, ENCRYPTO_STREAM_CHUNK, &produced);
+        if (err != 0) {
+            print_mbedtls_error("GCM encryption failed", err);
+            return ARCHIVE_FATAL;
+        }
+        if (produced != chunk) {
+            fprintf(stderr, "Unexpected GCM output length %zu (wanted %zu)\n", produced, chunk);
+            return ARCHIVE_FATAL;
+        }
+        if (fwrite(sink->out_buf, 1, produced, sink->payload_stream) != produced) {
+            perror("Failed to write ciphertext");
+            return ARCHIVE_FATAL;
+        }
+        sink->total_written += produced;
+        offset += chunk;
+    }
+
+    return (la_ssize_t)length;
+}
+
+static int archive_close_cb(struct archive* ar, void* client_data)
+{
+    (void)ar;
+    (void)client_data;
+    return ARCHIVE_OK;
+}
+
+static char* path_basename_dup(const char* path)
+{
+    if (!path) {
+        return NULL;
+    }
+    size_t len = strlen(path);
+    while (len > 0 && path[len - 1] == '/') {
+        len--;
+    }
+    if (len == 0) {
+        char* dot = (char*)malloc(2);
+        if (!dot) {
+            return NULL;
+        }
+        dot[0] = '.';
+        dot[1] = '\0';
+        return dot;
+    }
+    const char* end   = path + len;
+    const char* start = path;
+    for (const char* p = end; p != path; --p) {
+        if (*(p - 1) == '/') {
+            start = p;
+            break;
+        }
+    }
+    size_t base_len = (size_t)(end - start);
+    if (base_len == 0) {
+        base_len = len;
+        start    = path;
+    }
+    char* result = (char*)malloc(base_len + 1);
+    if (!result) {
+        return NULL;
+    }
+    memcpy(result, start, base_len);
+    result[base_len] = '\0';
+    return result;
+}
+
+static char* path_join(const char* lhs, const char* rhs)
+{
+    size_t lhs_len    = lhs ? strlen(lhs) : 0;
+    size_t rhs_len    = rhs ? strlen(rhs) : 0;
+    size_t need_slash = 0;
+    if (lhs_len > 0 && rhs_len > 0 && lhs[lhs_len - 1] != '/') {
+        need_slash = 1;
+    }
+    size_t total = lhs_len + need_slash + rhs_len + 1;
+    char*  out   = (char*)malloc(total);
+    if (!out) {
+        return NULL;
+    }
+    size_t offset = 0;
+    if (lhs_len > 0) {
+        memcpy(out + offset, lhs, lhs_len);
+        offset += lhs_len;
+    }
+    if (need_slash) {
+        out[offset++] = '/';
+    }
+    if (rhs_len > 0) {
+        memcpy(out + offset, rhs, rhs_len);
+        offset += rhs_len;
+    }
+    out[offset] = '\0';
+    return out;
+}
+
+static char* string_dup(const char* src)
+{
+    if (!src) {
+        return NULL;
+    }
+    size_t len = strlen(src);
+    char*  out = (char*)malloc(len + 1);
+    if (!out) {
+        return NULL;
+    }
+    memcpy(out, src, len + 1);
+    return out;
+}
+
+static int string_compare(const void* lhs, const void* rhs)
+{
+    const char* const* a = (const char* const*)lhs;
+    const char* const* b = (const char* const*)rhs;
+    return strcmp(*a, *b);
+}
+
+static int archive_add_path(struct archive* archive,
+                            const char*     source_path,
+                            const char*     rel_path,
+                            unsigned char*  io_buf,
+                            size_t          io_buf_len)
+{
+    if (!archive || !source_path || !rel_path) {
+        return -1;
+    }
+
+    struct stat st;
+    if (lstat(source_path, &st) != 0) {
+        fprintf(stderr, "Failed to stat '%s': %s\n", source_path, strerror(errno));
+        return -1;
+    }
+
+    struct archive_entry* entry = archive_entry_new();
+    if (!entry) {
+        fprintf(stderr, "Out of memory allocating archive entry\n");
+        return -1;
+    }
+
+    archive_entry_set_pathname(entry, rel_path);
+    archive_entry_copy_stat(entry, &st);
+    archive_entry_set_size(entry, S_ISREG(st.st_mode) ? st.st_size : 0);
+
+    if (S_ISLNK(st.st_mode)) {
+        size_t target_len = st.st_size > 0 ? (size_t)st.st_size + 1 : 256;
+        char*  target     = (char*)malloc(target_len);
+        if (!target) {
+            archive_entry_free(entry);
+            fprintf(stderr, "Out of memory allocating symlink target buffer\n");
+            return -1;
+        }
+        ssize_t read_len = readlink(source_path, target, target_len - 1);
+        if (read_len < 0) {
+            fprintf(stderr, "Failed to read symlink '%s': %s\n", source_path, strerror(errno));
+            free(target);
+            archive_entry_free(entry);
+            return -1;
+        }
+        target[read_len] = '\0';
+        archive_entry_set_symlink(entry, target);
+        free(target);
+    }
+
+    int r = archive_write_header(archive, entry);
+    if (r != ARCHIVE_OK) {
+        fprintf(stderr, "Failed to write archive header for '%s': %s\n", rel_path, archive_error_string(archive));
+        archive_entry_free(entry);
+        return -1;
+    }
+
+    int  result = 0;
+    DIR* dir    = NULL;
+    int  is_dir = S_ISDIR(st.st_mode);
+
+    if (S_ISREG(st.st_mode)) {
+        FILE* fp = fopen(source_path, "rb");
+        if (!fp) {
+            fprintf(stderr, "Failed to open '%s' for reading: %s\n", source_path, strerror(errno));
+            archive_entry_free(entry);
+            return -1;
+        }
+        while (1) {
+            size_t read_bytes = fread(io_buf, 1, io_buf_len, fp);
+            if (read_bytes > 0) {
+                const unsigned char* cursor    = io_buf;
+                size_t               remaining = read_bytes;
+                while (remaining > 0) {
+                    ssize_t written = archive_write_data(archive, cursor, remaining);
+                    if (written < 0) {
+                        fprintf(stderr, "Failed to write data for '%s': %s\n", rel_path, archive_error_string(archive));
+                        result = -1;
+                        break;
+                    }
+                    cursor += (size_t)written;
+                    remaining -= (size_t)written;
+                }
+            }
+
+            if (ferror(fp)) {
+                fprintf(stderr, "Failed to read '%s': %s\n", source_path, strerror(errno));
+                result = -1;
+            }
+
+            if (result != 0 || feof(fp)) {
+                break;
+            }
+        }
+        fclose(fp);
+    } else if (is_dir) {
+        dir = opendir(source_path);
+        if (!dir) {
+            fprintf(stderr, "Failed to open directory '%s': %s\n", source_path, strerror(errno));
+            archive_entry_free(entry);
+            return -1;
+        }
+    } else if (S_ISCHR(st.st_mode) || S_ISBLK(st.st_mode) || S_ISFIFO(st.st_mode) || S_ISSOCK(st.st_mode)) {
+        fprintf(stderr, "Unsupported file type for '%s'\n", source_path);
+        archive_entry_free(entry);
+        return -1;
+    }
+
+    if (result == 0) {
+        int finish_err = archive_write_finish_entry(archive);
+        if (finish_err != ARCHIVE_OK) {
+            fprintf(stderr, "Failed to finish archive entry '%s': %s\n", rel_path, archive_error_string(archive));
+            result = -1;
+        }
+    }
+
+    if (dir) {
+        struct dirent* dent;
+        char**         names    = NULL;
+        size_t         count    = 0;
+        size_t         capacity = 0;
+
+        while (result == 0 && (dent = readdir(dir)) != NULL) {
+            if (strcmp(dent->d_name, ".") == 0 || strcmp(dent->d_name, "..") == 0) {
+                continue;
+            }
+            if (count == capacity) {
+                size_t new_capacity = capacity == 0 ? 16 : capacity * 2;
+                char** tmp          = (char**)realloc(names, new_capacity * sizeof(char*));
+                if (!tmp) {
+                    result = -1;
+                    break;
+                }
+                names    = tmp;
+                capacity = new_capacity;
+            }
+            names[count] = string_dup(dent->d_name);
+            if (!names[count]) {
+                result = -1;
+                break;
+            }
+            count++;
+        }
+        closedir(dir);
+
+        if (result == 0) {
+            qsort(names, count, sizeof(char*), string_compare);
+            for (size_t i = 0; i < count; ++i) {
+                char* child_rel  = path_join(rel_path, names[i]);
+                char* child_path = path_join(source_path, names[i]);
+                if (!child_rel || !child_path) {
+                    free(child_rel);
+                    free(child_path);
+                    fprintf(stderr, "Out of memory expanding directory path\n");
+                    result = -1;
+                    break;
+                }
+                if (archive_add_path(archive, child_path, child_rel, io_buf, io_buf_len) != 0) {
+                    result = -1;
+                    free(child_rel);
+                    free(child_path);
+                    break;
+                }
+                free(child_rel);
+                free(child_path);
+            }
+        }
+
+        for (size_t i = 0; i < count; ++i) {
+            free(names[i]);
+        }
+        free(names);
+    }
+
+    archive_entry_free(entry);
+    return result;
+}
+
 int main(int argc, char** argv)
 {
     if (argc != 3) {
-        fprintf(stderr, "Usage: %s <input|-> <output|->\n", argv[0]);
+        fprintf(stderr, "Usage: %s <input_path> <output_path|->\n", argv[0]);
         return 1;
     }
 
     const char* input_path  = argv[1];
     const char* output_path = argv[2];
 
-    FILE* fin             = NULL;
-    FILE* fout            = NULL;
-    FILE* payload_stream  = NULL;
-    FILE* payload_tmp     = NULL;
-    int   close_input     = 0;
-    int   close_output    = 0;
-    int   using_spool     = 0;
-    int   output_seekable = 0;
+    FILE*           fout            = NULL;
+    FILE*           payload_stream  = NULL;
+    FILE*           payload_tmp     = NULL;
+    int             close_output    = 0;
+    int             using_spool     = 0;
+    int             output_seekable = 0;
+    struct archive* archive_writer  = NULL;
+    char*           archive_root    = NULL;
 
     if (strcmp(input_path, "-") == 0) {
-        fin = stdin;
-    } else {
-        fin = fopen(input_path, "rb");
-        if (!fin) {
-            perror("Failed to open input file");
-            return 1;
-        }
-        close_input = 1;
+        fprintf(stderr, "Streaming input '-' is not supported when compression is enabled\n");
+        return 1;
+    }
+
+    struct stat input_stat;
+    if (lstat(input_path, &input_stat) != 0) {
+        perror("Failed to stat input path");
+        return 1;
+    }
+
+    if (!S_ISREG(input_stat.st_mode) && !S_ISDIR(input_stat.st_mode) && !S_ISLNK(input_stat.st_mode)) {
+        fprintf(stderr, "Unsupported input type for '%s'\n", input_path);
+        return 1;
     }
 
     if (strcmp(output_path, "-") == 0) {
@@ -164,9 +519,6 @@ int main(int argc, char** argv)
         fout = fopen(output_path, "wb+");
         if (!fout) {
             perror("Failed to open output file");
-            if (close_input) {
-                fclose(fin);
-            }
             return 1;
         }
         close_output = 1;
@@ -183,9 +535,6 @@ int main(int argc, char** argv)
             perror("Failed to create temporary payload buffer");
             if (close_output) {
                 fclose(fout);
-            }
-            if (close_input) {
-                fclose(fin);
             }
             return 1;
         }
@@ -209,7 +558,6 @@ int main(int argc, char** argv)
     const size_t             sym_key_len           = 32;
     const size_t             iv_len                = 12;
     const size_t             tag_len               = 16;
-    const size_t             chunk_size            = 64 * 1024;
     const unsigned char      header_magic[4]       = { 'E', 'N', 'H', 'Y' };
     const unsigned char      header_version        = 1;
     unsigned char            session_key[32];
@@ -217,8 +565,9 @@ int main(int argc, char** argv)
     unsigned char            tag[16];
     unsigned char            header[17];
     unsigned char            final_block[16];
-    unsigned char*           in_buf  = NULL;
-    unsigned char*           out_buf = NULL;
+    unsigned char*           in_buf    = NULL;
+    unsigned char*           out_buf   = NULL;
+    unsigned char*           patch_buf = NULL;
 
     mbedtls_pk_context pk;
     mbedtls_pk_init(&pk);
@@ -326,9 +675,10 @@ int main(int argc, char** argv)
     }
 
     header_ct = (unsigned char*)calloc(1, key_len);
-    in_buf    = (unsigned char*)malloc(chunk_size);
-    out_buf   = (unsigned char*)malloc(chunk_size);
-    if (!header_ct || !in_buf || !out_buf) {
+    in_buf    = (unsigned char*)malloc(ENCRYPTO_STREAM_CHUNK);
+    out_buf   = (unsigned char*)malloc(ENCRYPTO_STREAM_CHUNK);
+    patch_buf = (unsigned char*)malloc(ENCRYPTO_STREAM_CHUNK);
+    if (!header_ct || !in_buf || !out_buf || !patch_buf) {
         fprintf(stderr, "Out of memory allocating IO buffers\n");
         goto cleanup;
     }
@@ -359,32 +709,69 @@ int main(int argc, char** argv)
         goto cleanup;
     }
 
-    uint64_t total_written = 0;
-    size_t   read_bytes;
-    while ((read_bytes = fread(in_buf, 1, chunk_size, fin)) > 0) {
-        size_t produced = 0;
-        err             = mbedtls_gcm_update(&gcm, in_buf, read_bytes, out_buf, chunk_size, &produced);
-        if (err != 0) {
-            print_mbedtls_error("GCM encryption failed", err);
-            goto cleanup;
-        }
+    archive_gcm_sink sink = { .gcm               = &gcm,
+                              .payload_stream    = payload_stream,
+                              .out_buf           = out_buf,
+                              .patch_buf         = patch_buf,
+                              .gzip_header_bytes = 0,
+                              .total_written     = 0 };
 
-        if (produced != read_bytes) {
-            fprintf(stderr, "Unexpected GCM output length %zu (wanted %zu)\n", produced, read_bytes);
-            goto cleanup;
-        }
-
-        if (fwrite(out_buf, 1, produced, payload_stream) != produced) {
-            perror("Failed to write ciphertext");
-            goto cleanup;
-        }
-        total_written += produced;
-    }
-
-    if (ferror(fin)) {
-        perror("Failed to read input file");
+    archive_writer = archive_write_new();
+    if (!archive_writer) {
+        fprintf(stderr, "Failed to create archive writer\n");
         goto cleanup;
     }
+
+    if (archive_write_add_filter_gzip(archive_writer) != ARCHIVE_OK) {
+        fprintf(stderr, "Failed to enable gzip filter: %s\n", archive_error_string(archive_writer));
+        goto cleanup;
+    }
+    if (archive_write_set_filter_option(archive_writer, "gzip", "timestamp", "0") != ARCHIVE_OK) {
+        fprintf(stderr, "Failed to set gzip timestamp: %s\n", archive_error_string(archive_writer));
+        goto cleanup;
+    }
+    if (archive_write_set_options(archive_writer, "gzip:timestamp=0") != ARCHIVE_OK) {
+        fprintf(stderr, "Failed to apply gzip timestamp option: %s\n", archive_error_string(archive_writer));
+        goto cleanup;
+    }
+    if (archive_write_set_bytes_per_block(archive_writer, 0) != ARCHIVE_OK) {
+        fprintf(stderr, "Failed to configure archive block size: %s\n", archive_error_string(archive_writer));
+        goto cleanup;
+    }
+    if (archive_write_set_bytes_in_last_block(archive_writer, 1) != ARCHIVE_OK) {
+        fprintf(stderr, "Failed to disable archive padding: %s\n", archive_error_string(archive_writer));
+        goto cleanup;
+    }
+    if (archive_write_set_format_pax_restricted(archive_writer) != ARCHIVE_OK) {
+        fprintf(stderr, "Failed to set archive format: %s\n", archive_error_string(archive_writer));
+        goto cleanup;
+    }
+    if (archive_write_open(archive_writer, &sink, NULL, archive_write_cb, archive_close_cb) != ARCHIVE_OK) {
+        fprintf(stderr, "Failed to open archive writer: %s\n", archive_error_string(archive_writer));
+        goto cleanup;
+    }
+
+    archive_root = path_basename_dup(input_path);
+    if (!archive_root) {
+        fprintf(stderr, "Out of memory deriving archive root name\n");
+        goto cleanup;
+    }
+
+    if (archive_add_path(archive_writer, input_path, archive_root, in_buf, ENCRYPTO_STREAM_CHUNK) != 0) {
+        goto cleanup;
+    }
+
+    free(archive_root);
+    archive_root = NULL;
+
+    if (archive_write_close(archive_writer) != ARCHIVE_OK) {
+        fprintf(stderr, "Failed to close archive writer: %s\n", archive_error_string(archive_writer));
+        goto cleanup;
+    }
+    archive_write_free(archive_writer);
+    archive_writer = NULL;
+
+    uint64_t total_written = sink.total_written;
 
     size_t final_len = 0;
 
@@ -431,7 +818,8 @@ int main(int argc, char** argv)
             perror("Failed to rewind payload buffer");
             goto cleanup;
         }
-        while ((read_bytes = fread(out_buf, 1, chunk_size, payload_stream)) > 0) {
+        size_t read_bytes;
+        while ((read_bytes = fread(out_buf, 1, ENCRYPTO_STREAM_CHUNK, payload_stream)) > 0) {
             if (fwrite(out_buf, 1, read_bytes, fout) != read_bytes) {
                 perror("Failed to stream ciphertext");
                 goto cleanup;
@@ -472,20 +860,29 @@ cleanup:
         mbedtls_platform_zeroize(header_ct, key_len);
     }
     if (in_buf) {
-        mbedtls_platform_zeroize(in_buf, chunk_size);
+        mbedtls_platform_zeroize(in_buf, ENCRYPTO_STREAM_CHUNK);
     }
     if (out_buf) {
-        mbedtls_platform_zeroize(out_buf, chunk_size);
+        mbedtls_platform_zeroize(out_buf, ENCRYPTO_STREAM_CHUNK);
+    }
+    if (patch_buf) {
+        mbedtls_platform_zeroize(patch_buf, ENCRYPTO_STREAM_CHUNK);
     }
 
     free(in_buf);
     free(out_buf);
+    free(patch_buf);
     if (payload_tmp) {
         fclose(payload_tmp);
     }
     free(pub_buf);
     free(rsa_ct);
     free(header_ct);
+    if (archive_writer) {
+        archive_write_close(archive_writer);
+        archive_write_free(archive_writer);
+    }
+    free(archive_root);
 
     if (use_deterministic_rng) {
         random_stream_unload(&deterministic_rng);
@@ -501,9 +898,6 @@ cleanup:
 
     if (close_output && fout) {
         fclose(fout);
-    }
-    if (close_input && fin) {
-        fclose(fin);
     }
 
     if (ret != 0 && close_output) {

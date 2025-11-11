@@ -9,6 +9,7 @@
 - 安装 [xmake](https://xmake.io/)。
 - Python 环境需可运行仓库根目录下的脚本，并已安装 [PyCryptodome](https://pycryptodome.readthedocs.io/)；如使用虚拟环境，请在调用脚本前激活。
 - 不需要额外的 `openssl` 可执行文件，密钥生成完全由 PyCryptodome 负责。
+- 编译依赖 [libarchive](https://www.libarchive.org/)，xmake 会自动拉取并构建；如希望使用系统库，请确保安装对应的开发包。
 
 ```bash
 python -m pip install pycryptodome
@@ -31,12 +32,12 @@ xmake build enc
 
 所有 CLI 均以 `main(argc == 3, input, output)` 形式接收参数，参数不符时会输出 `Usage:` 提示。
 
-- `enc <input> <output>`：利用 RSA+AES-GCM 混合方案加密文件，输出包含 `ENHY` 头的容器。
-- `dec <input> <output>`：校验并解密混合容器，恢复原始明文。
+- `enc <input> <output>`：输入既可以是常规文件，也可以是目录。目录会先按固定顺序打包为 `tar`，经 `gzip` 压缩后再进入 AES-GCM/RSA 混合加密流程。输出路径可为文件或 `-`（标准输出），以便串联到其他工具。
+- `dec <input|-> <output_dir>`：校验并解密混合容器，恢复出与加密端相同的 `tar.gz` 明文并自动展开。`output_dir` 必须为尚不存在的目录名，命令会在其中还原原始的文件/目录结构。
 
 ## 测试
 
-测试脚本覆盖混合流程，并验证容器结构元数据的正确性。
+测试脚本覆盖文件与目录两类输入：除随机生成的文件载荷外，还会对 `tmp/pyOCD/` 目录执行“打包 → 压缩 → 加密”流程，验证 CLI 输出与 Python 参考实现的二进制完全一致，并检查解密后目录结构无差异。
 
 ```bash
 pip install pycryptodome
