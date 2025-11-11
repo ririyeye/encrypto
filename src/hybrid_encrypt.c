@@ -2,6 +2,7 @@
 #define _XOPEN_SOURCE 700
 #endif
 
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <stdint.h>
@@ -143,13 +144,163 @@ static void store_u64_be(unsigned char* dst, uint64_t value)
     }
 }
 
+typedef enum compression_algorithm {
+    COMPRESSION_NONE    = 0,
+    COMPRESSION_GZIP    = 1,
+    COMPRESSION_ZSTD    = 2,
+    COMPRESSION_LZ4     = 3,
+    COMPRESSION_LZOP    = 4,
+    COMPRESSION_INVALID = 255
+} compression_algorithm;
+
+static const char* compression_algorithm_name(compression_algorithm algo)
+{
+    switch (algo) {
+    case COMPRESSION_NONE:
+        return "none";
+    case COMPRESSION_GZIP:
+        return "gzip";
+    case COMPRESSION_ZSTD:
+        return "zstd";
+    case COMPRESSION_LZ4:
+        return "lz4";
+    case COMPRESSION_LZOP:
+        return "lzop";
+    default:
+        return "invalid";
+    }
+}
+
+static int strings_equal_icase(const char* a, const char* b)
+{
+    if (!a || !b) {
+        return 0;
+    }
+    while (*a != '\0' && *b != '\0') {
+        if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) {
+            return 0;
+        }
+        ++a;
+        ++b;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+static int parse_compression_algorithm(const char* value, compression_algorithm* out)
+{
+    if (!out) {
+        return -1;
+    }
+    if (!value || value[0] == '\0') {
+        *out = COMPRESSION_LZ4;
+        return 0;
+    }
+
+    if (strings_equal_icase(value, "none")) {
+        *out = COMPRESSION_NONE;
+        return 0;
+    }
+    if (strings_equal_icase(value, "gzip") || strings_equal_icase(value, "gz")) {
+        *out = COMPRESSION_GZIP;
+        return 0;
+    }
+    if (strings_equal_icase(value, "zstd") || strings_equal_icase(value, "zst")) {
+        *out = COMPRESSION_ZSTD;
+        return 0;
+    }
+    if (strings_equal_icase(value, "lz4")) {
+        *out = COMPRESSION_LZ4;
+        return 0;
+    }
+    if (strings_equal_icase(value, "lzop") || strings_equal_icase(value, "lzo")) {
+        *out = COMPRESSION_LZOP;
+        return 0;
+    }
+
+    return -1;
+}
+
+static int compression_algorithm_to_id(compression_algorithm algo)
+{
+    switch (algo) {
+    case COMPRESSION_NONE:
+        return 0;
+    case COMPRESSION_GZIP:
+        return 1;
+    case COMPRESSION_ZSTD:
+        return 2;
+    case COMPRESSION_LZ4:
+        return 3;
+    case COMPRESSION_LZOP:
+        return 4;
+    default:
+        return -1;
+    }
+}
+
+static int configure_archive_filter(struct archive* writer, compression_algorithm algo)
+{
+    if (!writer) {
+        return -1;
+    }
+
+    int r = ARCHIVE_OK;
+
+    switch (algo) {
+    case COMPRESSION_NONE:
+        r = archive_write_add_filter_none(writer);
+        break;
+    case COMPRESSION_GZIP:
+        r = archive_write_add_filter_gzip(writer);
+        if (r == ARCHIVE_OK || r == ARCHIVE_WARN) {
+            int opt_r = archive_write_set_filter_option(writer, "gzip", "timestamp", "0");
+            if (opt_r != ARCHIVE_OK && opt_r != ARCHIVE_WARN) {
+                return -1;
+            }
+            opt_r = archive_write_set_options(writer, "gzip:timestamp=0");
+            if (opt_r != ARCHIVE_OK && opt_r != ARCHIVE_WARN) {
+                return -1;
+            }
+        }
+        break;
+    case COMPRESSION_ZSTD:
+        r = archive_write_add_filter_zstd(writer);
+        if (r == ARCHIVE_OK || r == ARCHIVE_WARN) {
+            archive_write_set_filter_option(writer, "zstd", "compression-level", "-3");
+            archive_write_set_filter_option(writer, "zstd", "threads", "0");
+        }
+        break;
+    case COMPRESSION_LZ4:
+        r = archive_write_add_filter_lz4(writer);
+        if (r == ARCHIVE_OK || r == ARCHIVE_WARN) {
+            archive_write_set_filter_option(writer, "lz4", "compression-level", "1");
+        }
+        break;
+    case COMPRESSION_LZOP:
+        r = archive_write_add_filter_lzop(writer);
+        if (r == ARCHIVE_OK || r == ARCHIVE_WARN) {
+            archive_write_set_filter_option(writer, "lzop", "compression-level", "1");
+        }
+        break;
+    default:
+        return -1;
+    }
+
+    if (r != ARCHIVE_OK && r != ARCHIVE_WARN) {
+        return -1;
+    }
+
+    return 0;
+}
+
 typedef struct archive_gcm_sink {
-    mbedtls_gcm_context* gcm;
-    FILE*                payload_stream;
-    unsigned char*       out_buf;
-    unsigned char*       patch_buf;
-    size_t               gzip_header_bytes;
-    uint64_t             total_written;
+    mbedtls_gcm_context*  gcm;
+    FILE*                 payload_stream;
+    unsigned char*        out_buf;
+    unsigned char*        patch_buf;
+    size_t                gzip_header_bytes;
+    uint64_t              total_written;
+    compression_algorithm compression_mode;
 } archive_gcm_sink;
 
 static la_ssize_t archive_write_cb(struct archive* ar, void* client_data, const void* buffer, size_t length)
@@ -168,7 +319,7 @@ static la_ssize_t archive_write_cb(struct archive* ar, void* client_data, const 
             chunk = ENCRYPTO_STREAM_CHUNK;
         }
         const unsigned char* chunk_src = (const unsigned char*)buffer + offset;
-        if (sink->gzip_header_bytes < 10 && sink->patch_buf) {
+        if (sink->compression_mode == COMPRESSION_GZIP && sink->gzip_header_bytes < 10 && sink->patch_buf) {
             memcpy(sink->patch_buf, chunk_src, chunk);
             size_t remaining_header = 10 - sink->gzip_header_bytes;
             if (remaining_header > chunk) {
@@ -538,14 +689,15 @@ int main(int argc, char** argv)
         output_path = argv[2];
     }
 
-    FILE*           fout            = NULL;
-    FILE*           payload_stream  = NULL;
-    FILE*           payload_tmp     = NULL;
-    int             close_output    = 0;
-    int             using_spool     = 0;
-    int             output_seekable = 0;
-    struct archive* archive_writer  = NULL;
-    char*           archive_root    = NULL;
+    FILE*                 fout            = NULL;
+    FILE*                 payload_stream  = NULL;
+    FILE*                 payload_tmp     = NULL;
+    int                   close_output    = 0;
+    int                   using_spool     = 0;
+    int                   output_seekable = 0;
+    struct archive*       archive_writer  = NULL;
+    char*                 archive_root    = NULL;
+    compression_algorithm compression_mode;
 
     if (strcmp(input_path, "-") == 0) {
         free(owned_output_path);
@@ -563,6 +715,13 @@ int main(int argc, char** argv)
     if (!S_ISREG(input_stat.st_mode) && !S_ISDIR(input_stat.st_mode) && !S_ISLNK(input_stat.st_mode)) {
         free(owned_output_path);
         fprintf(stderr, "Unsupported input type for '%s'\n", input_path);
+        return 1;
+    }
+
+    const char* compression_env = getenv("ENCRYPTO_COMPRESSION");
+    if (parse_compression_algorithm(compression_env, &compression_mode) != 0) {
+        fprintf(stderr, "Unknown compression algorithm '%s'\n", compression_env ? compression_env : "");
+        free(owned_output_path);
         return 1;
     }
 
@@ -614,11 +773,11 @@ int main(int argc, char** argv)
     const size_t             iv_len                = 12;
     const size_t             tag_len               = 16;
     const unsigned char      header_magic[4]       = { 'E', 'N', 'H', 'Y' };
-    const unsigned char      header_version        = 1;
+    const unsigned char      header_version        = 2;
     unsigned char            session_key[32];
     unsigned char            iv[12];
     unsigned char            tag[16];
-    unsigned char            header[17];
+    unsigned char            header[18];
     unsigned char            final_block[16];
     unsigned char*           in_buf    = NULL;
     unsigned char*           out_buf   = NULL;
@@ -732,10 +891,16 @@ int main(int argc, char** argv)
     header_ct = (unsigned char*)calloc(1, key_len);
     in_buf    = (unsigned char*)malloc(ENCRYPTO_STREAM_CHUNK);
     out_buf   = (unsigned char*)malloc(ENCRYPTO_STREAM_CHUNK);
-    patch_buf = (unsigned char*)malloc(ENCRYPTO_STREAM_CHUNK);
-    if (!header_ct || !in_buf || !out_buf || !patch_buf) {
+    if (!header_ct || !in_buf || !out_buf) {
         fprintf(stderr, "Out of memory allocating IO buffers\n");
         goto cleanup;
+    }
+    if (compression_mode == COMPRESSION_GZIP) {
+        patch_buf = (unsigned char*)malloc(ENCRYPTO_STREAM_CHUNK);
+        if (!patch_buf) {
+            fprintf(stderr, "Out of memory allocating gzip patch buffer\n");
+            goto cleanup;
+        }
     }
 
     if (output_seekable) {
@@ -746,13 +911,20 @@ int main(int argc, char** argv)
         }
     }
 
+    int compression_id = compression_algorithm_to_id(compression_mode);
+    if (compression_id < 0) {
+        fprintf(stderr, "Failed to encode compression algorithm\n");
+        goto cleanup;
+    }
+
     memset(header, 0, sizeof(header));
     memcpy(header, header_magic, sizeof(header_magic));
     header[4] = header_version;
-    store_u16_be(&header[5], (uint16_t)key_len);
-    header[7] = (unsigned char)iv_len;
-    header[8] = (unsigned char)tag_len;
-    store_u64_be(&header[9], 0);
+    header[5] = (unsigned char)compression_id;
+    store_u16_be(&header[6], (uint16_t)key_len);
+    header[8] = (unsigned char)iv_len;
+    header[9] = (unsigned char)tag_len;
+    store_u64_be(&header[10], 0);
 
     if (fwrite(rsa_ct, 1, key_len, payload_stream) != key_len) {
         perror("Failed to write RSA ciphertext");
@@ -769,7 +941,8 @@ int main(int argc, char** argv)
                               .out_buf           = out_buf,
                               .patch_buf         = patch_buf,
                               .gzip_header_bytes = 0,
-                              .total_written     = 0 };
+                              .total_written     = 0,
+                              .compression_mode  = compression_mode };
 
     archive_writer = archive_write_new();
     if (!archive_writer) {
@@ -777,16 +950,13 @@ int main(int argc, char** argv)
         goto cleanup;
     }
 
-    if (archive_write_add_filter_gzip(archive_writer) != ARCHIVE_OK) {
-        fprintf(stderr, "Failed to enable gzip filter: %s\n", archive_error_string(archive_writer));
-        goto cleanup;
-    }
-    if (archive_write_set_filter_option(archive_writer, "gzip", "timestamp", "0") != ARCHIVE_OK) {
-        fprintf(stderr, "Failed to set gzip timestamp: %s\n", archive_error_string(archive_writer));
-        goto cleanup;
-    }
-    if (archive_write_set_options(archive_writer, "gzip:timestamp=0") != ARCHIVE_OK) {
-        fprintf(stderr, "Failed to apply gzip timestamp option: %s\n", archive_error_string(archive_writer));
+    if (configure_archive_filter(archive_writer, compression_mode) != 0) {
+        const char* err_msg = archive_error_string(archive_writer);
+        fprintf(stderr,
+                "Failed to configure %s compression%s%s\n",
+                compression_algorithm_name(compression_mode),
+                err_msg ? ": " : "",
+                err_msg ? err_msg : "");
         goto cleanup;
     }
     if (archive_write_set_bytes_per_block(archive_writer, 0) != ARCHIVE_OK) {
@@ -849,7 +1019,7 @@ int main(int argc, char** argv)
         goto cleanup;
     }
 
-    store_u64_be(&header[9], total_written);
+    store_u64_be(&header[10], total_written);
     err = mbedtls_rsa_rsaes_oaep_encrypt(rsa, rng_func, rng_ctx, NULL, 0, sizeof(header), header, header_ct);
     if (err != 0) {
         print_mbedtls_error("RSA encryption of header failed", err);

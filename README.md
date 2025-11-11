@@ -2,7 +2,7 @@
 
 ## 项目简介
 
-本项目使用 mbedtls 实现两个 C99 CLI 工具：`enc`、`dec`。所有可执行文件都会在构建时内嵌密钥数据，`src/key_data.c` 输出的数组被统一复用。混合方案通过固定 17 字节的 `ENHY` 头部，将 AES-GCM 载荷封装在 RSA OAEP 信封内。
+本项目使用 mbedtls 实现两个 C99 CLI 工具：`enc`、`dec`。所有可执行文件都会在构建时内嵌密钥数据，`src/key_data.c` 输出的数组被统一复用。混合方案通过固定 18 字节的 `ENHY` 头部，将 AES-GCM 载荷封装在 RSA OAEP 信封内（仍向后兼容早期 17 字节版本）。
 
 ## 先决条件
 
@@ -10,6 +10,7 @@
 - Python 环境需可运行仓库根目录下的脚本，并已安装 [PyCryptodome](https://pycryptodome.readthedocs.io/)；如使用虚拟环境，请在调用脚本前激活。
 - 不需要额外的 `openssl` 可执行文件，密钥生成完全由 PyCryptodome 负责。
 - 编译依赖 [libarchive](https://www.libarchive.org/)，xmake 会自动拉取并构建；如希望使用系统库，请确保安装对应的开发包。
+- 若需使用 `zstd`/`lz4`/`lzop` 等附加算法，请确认本地 libarchive 已启用相应 filter（项目默认拉取的静态依赖已包含所需支持）。
 
 ```bash
 python -m pip install pycryptodome
@@ -32,8 +33,9 @@ xmake build enc
 
 所有 CLI 均以 `main(argc == 3, input, output)` 形式接收参数，参数不符时会输出 `Usage:` 提示。
 
-- `enc <input> <output>`：输入既可以是常规文件，也可以是目录。目录会先按固定顺序打包为 `tar`，经 `gzip` 压缩后再进入 AES-GCM/RSA 混合加密流程。输出路径可为文件或 `-`（标准输出），以便串联到其他工具。
-- `dec <input|-> <output_dir>`：校验并解密混合容器，恢复出与加密端相同的 `tar.gz` 明文并自动展开。`output_dir` 必须为尚不存在的目录名，命令会在其中还原原始的文件/目录结构。
+- `enc <input> <output>`：输入既可以是常规文件，也可以是目录。目录会先按固定顺序打包为 `tar`，再按所选算法压缩后进入 AES-GCM/RSA 混合加密流程。输出路径可为文件或 `-`（标准输出），以便串联到其他工具。
+- `dec <input|-> <output_dir>`：校验并解密混合容器，依据头部记录的算法还原压缩流并自动展开 `tar` 内容。`output_dir` 必须为尚不存在的目录名，命令会在其中恢复原始的文件/目录结构。
+- 通过环境变量 `ENCRYPTO_COMPRESSION` 选择打包阶段的压缩算法：支持 `lz4`（默认）、`gzip`、`zstd`、`lzop` 以及 `none`（仅打包为裸 `tar`）。`dec` 会从容器头部识别算法并自动匹配，因此无需额外参数；头部缺省值兼容旧版仅含 `gzip` 的容器。
 
 ## 测试
 
@@ -46,24 +48,27 @@ python scripts/test_rsa_cli.py
 
 脚本依赖 `xmake show -t <target>` 获取二进制路径，并在 `build/` 中写入临时数据。
 
+> 默认情况下测试脚本会将 `ENCRYPTO_COMPRESSION` 固定为 `gzip` 以复用 Python 参考实现的产出。如需覆盖其他算法，可在运行前设置 `ENCRYPTO_TEST_COMPRESSION=<none|gzip|...>`，脚本会透传到 CLI 并比对相应容器（目前参考实现仅覆盖 `gzip`/`none`）。
+
 ## 确定性随机数模式
 
 设置环境变量 `ENCRYPTO_TEST_RANDOM_PATH` 后，所有 CLI 会通过 `random_stream_load` 从指定文件读取确定性随机数，满足 OAEP 与盲化场景需求。当字节耗尽时实现会返回 `MBEDTLS_ERR_ENTROPY_SOURCE_FAILED`。新增代码应复用现有 RNG 助手，并确保使用完的敏感缓冲区调用 `mbedtls_platform_zeroize` 擦除。
 
 混合容器结构如下：
 
-1. 第一个 RSA OAEP 密文封装固定 17 字节头部（含魔数、协议版本、RSA 密文长度、IV/Tag 长度及明文长度）。
+1. 第一个 RSA OAEP 密文封装 18 字节头部（v2：含魔数、协议版本、压缩算法、RSA 密文长度、IV/Tag 长度及压缩后载荷长度）。解密端仍兼容早期 17 字节版本（固定 `gzip`）。
 2. 第二个 RSA OAEP 密文封装 32 字节 AES 会话密钥。
 3. 随后依次为 12 字节 IV、AES-GCM 密文块，以及 16 字节 Tag。
 
 | 字段 | 偏移/大小 | 编码 | 含义 |
 | --- | --- | --- | --- |
 | Magic | 0-3 字节 | ASCII `ENHY` | 固定魔数，标识混合容器 |
-| Version | 第 4 字节 | `uint8` | 当前版本固定为 1 |
-| RSA 密文长度 | 第 5-6 字节 | `uint16` 大端 | RSA OAEP 密文长度，应等于 `mbedtls_rsa_get_len` |
-| IV 长度 | 第 7 字节 | `uint8` | AES-GCM IV 长度，当前固定为 12 |
-| Tag 长度 | 第 8 字节 | `uint8` | AES-GCM Tag 长度，当前固定为 16 |
-| 明文长度 | 第 9-16 字节 | `uint64` 大端 | 原始明文总长度（字节） |
+| Version | 第 4 字节 | `uint8` | 当前版本为 2；值为 1 时表示旧格式（默认 `gzip`） |
+| Compression | 第 5 字节 | `uint8` | 压缩算法：0=`none`，1=`gzip`，2=`zstd`，3=`lz4`，4=`lzop` |
+| RSA 密文长度 | 第 6-7 字节 | `uint16` 大端 | RSA OAEP 密文长度，应等于 `mbedtls_rsa_get_len` |
+| IV 长度 | 第 8 字节 | `uint8` | AES-GCM IV 长度，当前固定为 12 |
+| Tag 长度 | 第 9 字节 | `uint8` | AES-GCM Tag 长度，当前固定为 16 |
+| 密文长度 | 第 10-17 字节 | `uint64` 大端 | AES-GCM 密文长度（即压缩后 `tar` 尺寸） |
 
 AES-GCM 固定使用 32 字节会话密钥、12 字节 IV、16 字节 Tag，并以 64 KiB 分块处理数据。
 

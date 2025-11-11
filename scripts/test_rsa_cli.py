@@ -103,9 +103,11 @@ def resolve_target(repo_root: Path, name: str) -> Path:
                 return candidate.resolve()
     raise SystemExit(f"Unable to determine target path for {name}")
 
-def run_cli(program: Path, src: Path, dst: Path, random_path: Path) -> None:
+def run_cli(program: Path, src: Path, dst: Path, random_path: Path, compression: str) -> None:
     env = os.environ.copy()
     env["ENCRYPTO_TEST_RANDOM_PATH"] = str(random_path)
+    if compression:
+        env["ENCRYPTO_COMPRESSION"] = compression
     program_path = Path(program)
     if not program_path.exists():
         raise SystemExit(f"Executable not found: {program_path}")
@@ -120,6 +122,38 @@ def load_bytes(path: Path) -> bytes:
 def write_bytes(path: Path, data: bytes) -> None:
     with path.open("wb") as fp:
         fp.write(data)
+
+
+def normalize_compression(value: str | None) -> str:
+    if value is None:
+        return "gzip"
+    key = value.strip().lower()
+    if not key:
+        return "gzip"
+    if key in {"gz", "gzip"}:
+        return "gzip"
+    if key in {"zstd", "zst"}:
+        return "zstd"
+    if key in {"lzop", "lzo"}:
+        return "lzop"
+    if key in {"none", "raw", "tar"}:
+        return "none"
+    if key == "lz4":
+        return "lz4"
+    raise ValueError(f"unsupported compression '{value}'")
+
+
+def compression_to_id(name: str) -> int:
+    lookup = {
+        "none": 0,
+        "gzip": 1,
+        "zstd": 2,
+        "lz4": 3,
+        "lzop": 4,
+    }
+    if name not in lookup:
+        raise ValueError(f"unknown compression '{name}'")
+    return lookup[name]
 
 
 class RandomByteStream:
@@ -139,7 +173,7 @@ class RandomByteStream:
         return self.take(length)
 
 
-def build_tar_gz(root: Path) -> bytes:
+def build_tar_bytes(root: Path) -> bytes:
     root = root.resolve()
 
     block_size = tarfile.BLOCKSIZE
@@ -223,8 +257,10 @@ def build_tar_gz(root: Path) -> bytes:
     trimmed_len = idx + 2 * block_size
     if trimmed_len > len(tar_bytes):
         trimmed_len = len(tar_bytes)
-    tar_bytes = bytes(tar_bytes[:trimmed_len])
+    return bytes(tar_bytes[:trimmed_len])
 
+
+def gzip_from_tar(tar_bytes: bytes) -> bytes:
     compressor = zlib.compressobj(
         level=6,
         method=zlib.DEFLATED,
@@ -243,7 +279,21 @@ def build_tar_gz(root: Path) -> bytes:
     return header + compressed + trailer
 
 
-def build_python_container(public_key: RSA.RsaKey, rng: RandomByteStream, payload: bytes) -> bytes:
+def build_tar_payload(root: Path, compression: str) -> bytes:
+    tar_bytes = build_tar_bytes(root)
+    if compression == "none":
+        return tar_bytes
+    if compression == "gzip":
+        return gzip_from_tar(tar_bytes)
+    raise SystemExit(
+        "python reference harness only supports 'gzip' or 'none'; "
+        "set ENCRYPTO_TEST_COMPRESSION=gzip for other modes"
+    )
+
+
+def build_python_container(
+    public_key: RSA.RsaKey, rng: RandomByteStream, payload: bytes, compression: str
+) -> bytes:
     session_key = rng.take(32)
     iv = rng.take(12)
 
@@ -253,13 +303,16 @@ def build_python_container(public_key: RSA.RsaKey, rng: RandomByteStream, payloa
     aes = AES.new(session_key, AES.MODE_GCM, nonce=iv)
     ciphertext, tag = aes.encrypt_and_digest(payload)
 
-    header = bytearray(17)
+    compression_id = compression_to_id(compression)
+
+    header = bytearray(18)
     header[0:4] = b"ENHY"
-    header[4] = 1
-    header[5:7] = len(rsa_session).to_bytes(2, "big")
-    header[7] = len(iv)
-    header[8] = len(tag)
-    header[9:17] = len(ciphertext).to_bytes(8, "big")
+    header[4] = 2
+    header[5] = compression_id
+    header[6:8] = len(rsa_session).to_bytes(2, "big")
+    header[8] = len(iv)
+    header[9] = len(tag)
+    header[10:18] = len(ciphertext).to_bytes(8, "big")
 
     rsa_header = oaep_cipher.encrypt(bytes(header))
 
@@ -321,7 +374,17 @@ def compare_directories(lhs: Path, rhs: Path) -> None:
                 raise AssertionError(f"Symlink target mismatch for '{rel}'")
 
 
-def execute_tests(repo_root: Path, sizes: Sequence[int]) -> None:
+def execute_tests(repo_root: Path, sizes: Sequence[int], compression: str | None) -> None:
+    try:
+        compression = normalize_compression(compression)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if compression not in {"gzip", "none"}:
+        raise SystemExit(
+            "python reference harness only supports ENCRYPTO_COMPRESSION in {gzip, none}; "
+            "set ENCRYPTO_TEST_COMPRESSION=gzip to match the reference output"
+        )
     targets: List[str] = ["enc", "dec"]
 
     ensure_built(repo_root, targets)
@@ -356,18 +419,20 @@ def execute_tests(repo_root: Path, sizes: Sequence[int]) -> None:
             random_path = tmpdir / f"hy_rand_file_{size}.bin"
             write_bytes(random_path, random_bytes)
 
-            tar_payload = build_tar_gz(plain_path)
-            python_container = build_python_container(public_key, RandomByteStream(random_bytes), tar_payload)
+            tar_payload = build_tar_payload(plain_path, compression)
+            python_container = build_python_container(
+                public_key, RandomByteStream(random_bytes), tar_payload, compression
+            )
 
             container_path = tmpdir / f"hy_enc_file_{size}.bin"
-            run_cli(enc_path, plain_path, container_path, random_path)
+            run_cli(enc_path, plain_path, container_path, random_path, compression)
 
             cli_container = load_bytes(container_path)
             if cli_container != python_container:
                 raise AssertionError(f"Compressed+encrypted mismatch for file payload size {size}")
 
             roundtrip_dir = tmpdir / f"hy_roundtrip_file_{size}"
-            run_cli(dec_path, container_path, roundtrip_dir, random_path)
+            run_cli(dec_path, container_path, roundtrip_dir, random_path, compression)
             extracted_file = roundtrip_dir / plain_path.name
             if not extracted_file.is_file():
                 raise AssertionError(f"Decrypted file missing for payload size {size}")
@@ -379,22 +444,24 @@ def execute_tests(repo_root: Path, sizes: Sequence[int]) -> None:
 
             print(f"[OK] file payload of {size} bytes round-tripped")
 
-        tar_payload = build_tar_gz(pyocd_root)
+        tar_payload = build_tar_payload(pyocd_root, compression)
         random_bytes = os.urandom(random_len)
         random_path = tmpdir / "hy_rand_pyocd.bin"
         write_bytes(random_path, random_bytes)
 
-        python_container = build_python_container(public_key, RandomByteStream(random_bytes), tar_payload)
+        python_container = build_python_container(
+            public_key, RandomByteStream(random_bytes), tar_payload, compression
+        )
 
         container_path = tmpdir / "hy_enc_pyocd.bin"
-        run_cli(enc_path, pyocd_root, container_path, random_path)
+        run_cli(enc_path, pyocd_root, container_path, random_path, compression)
 
         cli_container = load_bytes(container_path)
         if cli_container != python_container:
             raise AssertionError("Compressed+encrypted pyOCD container mismatch")
 
         roundtrip_dir = tmpdir / "hy_roundtrip_pyocd"
-        run_cli(dec_path, container_path, roundtrip_dir, random_path)
+        run_cli(dec_path, container_path, roundtrip_dir, random_path, compression)
         extracted_root = roundtrip_dir / pyocd_root.name
         if not extracted_root.exists():
             raise AssertionError("Decrypted pyOCD root not found")
@@ -432,7 +499,8 @@ def main(argv: Sequence[str]) -> int:
         ]
 
     repo_root = Path(__file__).resolve().parents[1]
-    execute_tests(repo_root, sizes)
+    compression = os.environ.get("ENCRYPTO_TEST_COMPRESSION")
+    execute_tests(repo_root, sizes, compression)
     return 0
 
 

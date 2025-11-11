@@ -131,6 +131,51 @@ static uint64_t load_u64_be(const unsigned char* src)
     return value;
 }
 
+typedef enum compression_algorithm {
+    COMPRESSION_NONE    = 0,
+    COMPRESSION_GZIP    = 1,
+    COMPRESSION_ZSTD    = 2,
+    COMPRESSION_LZ4     = 3,
+    COMPRESSION_LZOP    = 4,
+    COMPRESSION_INVALID = 255
+} compression_algorithm;
+
+static const char* compression_algorithm_name(compression_algorithm algo)
+{
+    switch (algo) {
+    case COMPRESSION_NONE:
+        return "none";
+    case COMPRESSION_GZIP:
+        return "gzip";
+    case COMPRESSION_ZSTD:
+        return "zstd";
+    case COMPRESSION_LZ4:
+        return "lz4";
+    case COMPRESSION_LZOP:
+        return "lzop";
+    default:
+        return "invalid";
+    }
+}
+
+static compression_algorithm compression_algorithm_from_id(unsigned int id)
+{
+    switch (id) {
+    case 0:
+        return COMPRESSION_NONE;
+    case 1:
+        return COMPRESSION_GZIP;
+    case 2:
+        return COMPRESSION_ZSTD;
+    case 3:
+        return COMPRESSION_LZ4;
+    case 4:
+        return COMPRESSION_LZOP;
+    default:
+        return COMPRESSION_INVALID;
+    }
+}
+
 static int path_is_safe_relative(const char* path)
 {
     if (!path || path[0] == '\0') {
@@ -449,7 +494,42 @@ static int remove_tree_quiet(const char* path)
     return 0;
 }
 
-static int extract_tar_gz(FILE* stream, const char* output_root)
+static int enable_reader_filter(struct archive* reader, compression_algorithm algorithm)
+{
+    if (!reader) {
+        return -1;
+    }
+
+    int r = ARCHIVE_OK;
+
+    switch (algorithm) {
+    case COMPRESSION_NONE:
+        r = archive_read_support_filter_none(reader);
+        break;
+    case COMPRESSION_GZIP:
+        r = archive_read_support_filter_gzip(reader);
+        break;
+    case COMPRESSION_ZSTD:
+        r = archive_read_support_filter_zstd(reader);
+        break;
+    case COMPRESSION_LZ4:
+        r = archive_read_support_filter_lz4(reader);
+        break;
+    case COMPRESSION_LZOP:
+        r = archive_read_support_filter_lzop(reader);
+        break;
+    default:
+        return -1;
+    }
+
+    if (r != ARCHIVE_OK && r != ARCHIVE_WARN) {
+        return -1;
+    }
+
+    return 0;
+}
+
+static int extract_tar_stream(FILE* stream, compression_algorithm algorithm, const char* output_root)
 {
     if (!stream || !output_root) {
         return -1;
@@ -466,7 +546,12 @@ static int extract_tar_gz(FILE* stream, const char* output_root)
         return -1;
     }
 
-    archive_read_support_filter_gzip(reader);
+    if (enable_reader_filter(reader, algorithm) != 0) {
+        fprintf(stderr, "Failed to enable %s decompression support\n", compression_algorithm_name(algorithm));
+        archive_write_free(writer);
+        archive_read_free(reader);
+        return -1;
+    }
     archive_read_support_format_tar(reader);
 
     const int extract_flags = ARCHIVE_EXTRACT_TIME | ARCHIVE_EXTRACT_PERM | ARCHIVE_EXTRACT_ACL | ARCHIVE_EXTRACT_XATTR
@@ -630,14 +715,15 @@ int main(int argc, char** argv)
     unsigned char            iv[32];
     unsigned char            tag[32];
     unsigned char            computed_tag[32];
-    unsigned char            header[17];
+    unsigned char            header[18];
     unsigned char            final_block[16];
-    size_t                   priv_size = 0;
-    size_t                   key_len   = 0;
-    uint16_t                 rsa_len   = 0;
-    uint8_t                  iv_len    = 0;
-    uint8_t                  tag_len   = 0;
-    uint64_t                 ct_len64  = 0;
+    size_t                   priv_size        = 0;
+    size_t                   key_len          = 0;
+    uint16_t                 rsa_len          = 0;
+    uint8_t                  iv_len           = 0;
+    uint8_t                  tag_len          = 0;
+    uint64_t                 ct_len64         = 0;
+    compression_algorithm    compression_mode = COMPRESSION_INVALID;
 
     mbedtls_pk_context pk;
     mbedtls_pk_init(&pk);
@@ -711,7 +797,8 @@ int main(int argc, char** argv)
     }
 
     size_t header_len = sizeof(header);
-    err               = mbedtls_rsa_rsaes_oaep_decrypt(rsa,
+    memset(header, 0, sizeof(header));
+    err = mbedtls_rsa_rsaes_oaep_decrypt(rsa,
                                          rng_func,
                                          rng_ctx,
                                          NULL,
@@ -724,7 +811,7 @@ int main(int argc, char** argv)
         print_mbedtls_error("Failed to decrypt header", err);
         goto cleanup;
     }
-    if (header_len != sizeof(header)) {
+    if (header_len != sizeof(header) && header_len != 17) {
         fprintf(stderr, "Unexpected decrypted header length %zu\n", header_len);
         goto cleanup;
     }
@@ -735,15 +822,26 @@ int main(int argc, char** argv)
         goto cleanup;
     }
 
-    if (header[4] != 1) {
+    if (header[4] == 1) {
+        compression_mode = COMPRESSION_GZIP;
+        rsa_len          = load_u16_be(&header[5]);
+        iv_len           = header[7];
+        tag_len          = header[8];
+        ct_len64         = load_u64_be(&header[9]);
+    } else if (header[4] == 2) {
+        compression_mode = compression_algorithm_from_id(header[5]);
+        if (compression_mode == COMPRESSION_INVALID) {
+            fprintf(stderr, "Unknown compression algorithm id %u\n", header[5]);
+            goto cleanup;
+        }
+        rsa_len  = load_u16_be(&header[6]);
+        iv_len   = header[8];
+        tag_len  = header[9];
+        ct_len64 = load_u64_be(&header[10]);
+    } else {
         fprintf(stderr, "Unsupported format version %u\n", header[4]);
         goto cleanup;
     }
-
-    rsa_len  = load_u16_be(&header[5]);
-    iv_len   = header[7];
-    tag_len  = header[8];
-    ct_len64 = load_u64_be(&header[9]);
 
     if (rsa_len != key_len) {
         fprintf(stderr, "RSA ciphertext length mismatch\n");
@@ -901,7 +999,12 @@ int main(int argc, char** argv)
     }
     output_dir_created = 1;
 
-    if (extract_tar_gz(payload_tmp, output_path) != 0) {
+    if (compression_mode == COMPRESSION_INVALID) {
+        fprintf(stderr, "Container missing compression metadata\n");
+        goto cleanup;
+    }
+
+    if (extract_tar_stream(payload_tmp, compression_mode, output_path) != 0) {
         goto cleanup;
     }
 
