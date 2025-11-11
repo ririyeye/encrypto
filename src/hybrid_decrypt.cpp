@@ -48,14 +48,14 @@ static int random_stream_load(const char* path, random_stream* stream)
         return -1;
     }
 
-    stream->data = (unsigned char*)malloc((size_t)size);
+    stream->data = static_cast<unsigned char*>(malloc(static_cast<size_t>(size)));
     if (!stream->data) {
         fprintf(stderr, "Out of memory loading deterministic random source\n");
         fclose(fp);
         return -1;
     }
 
-    if (fread(stream->data, 1, (size_t)size, fp) != (size_t)size) {
+    if (fread(stream->data, 1, static_cast<size_t>(size), fp) != static_cast<size_t>(size)) {
         fprintf(stderr, "Failed to read deterministic random source '%s'\n", path);
         free(stream->data);
         stream->data = NULL;
@@ -83,7 +83,7 @@ static void random_stream_unload(random_stream* stream)
 
 static int random_stream_func(void* ctx, unsigned char* out, size_t len)
 {
-    random_stream* stream = (random_stream*)ctx;
+    random_stream* stream = static_cast<random_stream*>(ctx);
     if (!stream || len == 0) {
         return 0;
     }
@@ -105,7 +105,7 @@ static void print_mbedtls_error(const char* label, int code)
 
 static uint16_t load_u16_be(const unsigned char* src)
 {
-    return (uint16_t)((src[0] << 8) | src[1]);
+    return static_cast<uint16_t>((src[0] << 8) | src[1]);
 }
 
 static uint64_t load_u64_be(const unsigned char* src)
@@ -190,7 +190,7 @@ int main(int argc, char** argv)
     mbedtls_gcm_init(&gcm);
 
     priv_size = key_data_private_size();
-    priv_buf  = (unsigned char*)malloc(priv_size + 1);
+    priv_buf  = static_cast<unsigned char*>(malloc(priv_size + 1));
     if (!priv_buf) {
         fprintf(stderr, "Out of memory allocating private key buffer\n");
         goto cleanup;
@@ -214,7 +214,7 @@ int main(int argc, char** argv)
 
     key_len = mbedtls_rsa_get_len(rsa);
 
-    header_ct = (unsigned char*)malloc(key_len);
+    header_ct = static_cast<unsigned char*>(malloc(key_len));
     if (!header_ct) {
         fprintf(stderr, "Out of memory allocating encrypted header buffer\n");
         goto cleanup;
@@ -245,7 +245,7 @@ int main(int argc, char** argv)
         err              = mbedtls_ctr_drbg_seed(&ctr_drbg,
                                     mbedtls_entropy_func,
                                     &entropy,
-                                    (const unsigned char*)pers,
+                                    reinterpret_cast<const unsigned char*>(pers),
                                     strlen(pers));
         if (err != 0) {
             print_mbedtls_error("Failed to seed RNG", err);
@@ -304,7 +304,7 @@ int main(int argc, char** argv)
         goto cleanup;
     }
 
-    rsa_ct = (unsigned char*)malloc(key_len);
+    rsa_ct = static_cast<unsigned char*>(malloc(key_len));
     if (!rsa_ct) {
         fprintf(stderr, "Out of memory allocating RSA buffer\n");
         goto cleanup;
@@ -338,7 +338,7 @@ int main(int argc, char** argv)
         goto cleanup;
     }
 
-    err = mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, session_key, (unsigned int)(session_key_len * 8));
+    err = mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, session_key, static_cast<unsigned int>(session_key_len * 8));
     if (err != 0) {
         print_mbedtls_error("Failed to set AES-GCM key", err);
         goto cleanup;
@@ -350,8 +350,8 @@ int main(int argc, char** argv)
         goto cleanup;
     }
 
-    cipher_buf = (unsigned char*)malloc(chunk_size);
-    plain_buf  = (unsigned char*)malloc(chunk_size);
+    cipher_buf = static_cast<unsigned char*>(malloc(chunk_size));
+    plain_buf  = static_cast<unsigned char*>(malloc(chunk_size));
     if (!cipher_buf || !plain_buf) {
         fprintf(stderr, "Out of memory allocating IO buffers\n");
         goto cleanup;
@@ -359,7 +359,7 @@ int main(int argc, char** argv)
 
     uint64_t remaining = ct_len64;
     while (remaining > 0) {
-        size_t to_read = remaining > chunk_size ? chunk_size : (size_t)remaining;
+        size_t to_read = remaining > chunk_size ? chunk_size : static_cast<size_t>(remaining);
         size_t got     = fread(cipher_buf, 1, to_read, fin);
         if (got != to_read) {
             fprintf(stderr, "Failed to read ciphertext chunk\n");

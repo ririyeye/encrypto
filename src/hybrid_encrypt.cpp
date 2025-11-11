@@ -48,14 +48,14 @@ static int random_stream_load(const char* path, random_stream* stream)
         return -1;
     }
 
-    stream->data = (unsigned char*)malloc((size_t)size);
+    stream->data = static_cast<unsigned char*>(malloc(static_cast<size_t>(size)));
     if (!stream->data) {
         fprintf(stderr, "Out of memory loading deterministic random source\n");
         fclose(fp);
         return -1;
     }
 
-    if (fread(stream->data, 1, (size_t)size, fp) != (size_t)size) {
+    if (fread(stream->data, 1, static_cast<size_t>(size), fp) != static_cast<size_t>(size)) {
         fprintf(stderr, "Failed to read deterministic random source '%s'\n", path);
         free(stream->data);
         stream->data = NULL;
@@ -83,7 +83,7 @@ static void random_stream_unload(random_stream* stream)
 
 static int random_stream_func(void* ctx, unsigned char* out, size_t len)
 {
-    random_stream* stream = (random_stream*)ctx;
+    random_stream* stream = static_cast<random_stream*>(ctx);
     if (!stream || len == 0) {
         return 0;
     }
@@ -117,14 +117,14 @@ static int rng_bytes(int (*rng_func)(void*, unsigned char*, size_t), void* rng_c
 
 static void store_u16_be(unsigned char* dst, uint16_t value)
 {
-    dst[0] = (unsigned char)((value >> 8) & 0xFF);
-    dst[1] = (unsigned char)(value & 0xFF);
+    dst[0] = static_cast<unsigned char>((value >> 8) & 0xFF);
+    dst[1] = static_cast<unsigned char>(value & 0xFF);
 }
 
 static void store_u64_be(unsigned char* dst, uint64_t value)
 {
     for (int i = 0; i < 8; ++i) {
-        dst[i] = (unsigned char)((value >> (56 - 8 * i)) & 0xFF);
+        dst[i] = static_cast<unsigned char>((value >> (56 - 8 * i)) & 0xFF);
     }
 }
 
@@ -225,7 +225,7 @@ int main(int argc, char** argv)
     mbedtls_gcm_init(&gcm);
 
     size_t pub_size = key_data_public_size();
-    pub_buf         = (unsigned char*)malloc(pub_size + 1);
+    pub_buf         = static_cast<unsigned char*>(malloc(pub_size + 1));
     if (!pub_buf) {
         fprintf(stderr, "Out of memory allocating public key buffer\n");
         goto cleanup;
@@ -281,7 +281,7 @@ int main(int argc, char** argv)
         err              = mbedtls_ctr_drbg_seed(&ctr_drbg,
                                     mbedtls_entropy_func,
                                     &entropy,
-                                    (const unsigned char*)pers,
+                                    reinterpret_cast<const unsigned char*>(pers),
                                     strlen(pers));
         if (err != 0) {
             print_mbedtls_error("Failed to seed RNG", err);
@@ -301,7 +301,7 @@ int main(int argc, char** argv)
         goto cleanup;
     }
 
-    rsa_ct = (unsigned char*)malloc(key_len);
+    rsa_ct = static_cast<unsigned char*>(malloc(key_len));
     if (!rsa_ct) {
         fprintf(stderr, "Out of memory allocating RSA ciphertext buffer\n");
         goto cleanup;
@@ -313,7 +313,7 @@ int main(int argc, char** argv)
         goto cleanup;
     }
 
-    err = mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, session_key, (unsigned int)(sym_key_len * 8));
+    err = mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, session_key, static_cast<unsigned int>(sym_key_len * 8));
     if (err != 0) {
         print_mbedtls_error("Failed to set AES-GCM key", err);
         goto cleanup;
@@ -325,9 +325,9 @@ int main(int argc, char** argv)
         goto cleanup;
     }
 
-    header_ct = (unsigned char*)calloc(1, key_len);
-    in_buf    = (unsigned char*)malloc(chunk_size);
-    out_buf   = (unsigned char*)malloc(chunk_size);
+    header_ct = static_cast<unsigned char*>(calloc(1, key_len));
+    in_buf    = static_cast<unsigned char*>(malloc(chunk_size));
+    out_buf   = static_cast<unsigned char*>(malloc(chunk_size));
     if (!header_ct || !in_buf || !out_buf) {
         fprintf(stderr, "Out of memory allocating IO buffers\n");
         goto cleanup;
@@ -344,9 +344,9 @@ int main(int argc, char** argv)
     memset(header, 0, sizeof(header));
     memcpy(header, header_magic, sizeof(header_magic));
     header[4] = header_version;
-    store_u16_be(&header[5], (uint16_t)key_len);
-    header[7] = (unsigned char)iv_len;
-    header[8] = (unsigned char)tag_len;
+    store_u16_be(&header[5], static_cast<uint16_t>(key_len));
+    header[7] = static_cast<unsigned char>(iv_len);
+    header[8] = static_cast<unsigned char>(tag_len);
     store_u64_be(&header[9], 0);
 
     if (fwrite(rsa_ct, 1, key_len, payload_stream) != key_len) {

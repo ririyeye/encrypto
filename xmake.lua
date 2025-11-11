@@ -1,5 +1,5 @@
 set_project("encrypto")
-set_languages("c99")
+set_languages("c++11")
 
 add_rules("mode.debug", "mode.release")
 
@@ -53,19 +53,19 @@ rule_end()
 target("key_data")
     set_kind("static")
     add_rules("generate_keys")
-    add_files("src/key_data.c")
+    add_files("src/key_data.cpp")
     add_includedirs("$(builddir)/generated")
 
 
 target("enc")
     set_kind("binary")
-    add_files("src/hybrid_encrypt.c")
+    add_files("src/hybrid_encrypt.cpp")
     add_packages("mbedtls")
     add_deps("key_data")
 
 
 target("dec")
     set_kind("binary")
-    add_files("src/hybrid_decrypt.c")
+    add_files("src/hybrid_decrypt.cpp")
     add_packages("mbedtls")
     add_deps("key_data")
