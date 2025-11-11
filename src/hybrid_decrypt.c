@@ -566,7 +566,9 @@ static int extract_tar_stream(FILE* stream, compression_algorithm algorithm, con
         return -1;
     }
 
-    int result = 0;
+    int    result         = 0;
+    char*  strip_root     = NULL;
+    size_t strip_root_len = 0;
 
     while (result == 0) {
         struct archive_entry* entry;
@@ -581,15 +583,66 @@ static int extract_tar_stream(FILE* stream, compression_algorithm algorithm, con
         }
 
         const char* rel_path = archive_entry_pathname(entry);
-        if (!path_is_safe_relative(rel_path)) {
-            fprintf(stderr, "Archive entry contains unsafe path '%s'\n", rel_path ? rel_path : "<null>");
+        if (!rel_path) {
+            fprintf(stderr, "Archive entry missing path\n");
             result = -1;
             break;
         }
 
-        char* full_path = path_join(output_root, rel_path);
+        size_t rel_len = strlen(rel_path);
+        while (rel_len > 0 && rel_path[rel_len - 1] == '/') {
+            rel_len--;
+        }
+
+        char*       rel_trimmed_buf = NULL;
+        const char* safe_rel_path   = rel_path;
+        if (rel_len != strlen(rel_path)) {
+            rel_trimmed_buf = (char*)malloc(rel_len + 1);
+            if (!rel_trimmed_buf) {
+                fprintf(stderr, "Out of memory trimming archive path\n");
+                result = -1;
+                break;
+            }
+            memcpy(rel_trimmed_buf, rel_path, rel_len);
+            rel_trimmed_buf[rel_len] = '\0';
+            safe_rel_path            = rel_trimmed_buf;
+        }
+
+        if (!path_is_safe_relative(safe_rel_path)) {
+            fprintf(stderr, "Archive entry contains unsafe path '%s'\n", safe_rel_path ? safe_rel_path : "<null>");
+            free(rel_trimmed_buf);
+            result = -1;
+            break;
+        }
+
+        if (!strip_root && archive_entry_filetype(entry) == AE_IFDIR) {
+            const char* slash = strchr(safe_rel_path, '/');
+            if (!slash) {
+                strip_root = string_dup(safe_rel_path);
+                if (!strip_root) {
+                    fprintf(stderr, "Out of memory capturing archive root\n");
+                    free(rel_trimmed_buf);
+                    result = -1;
+                    break;
+                }
+                strip_root_len = strlen(strip_root);
+            }
+        }
+
+        const char* adjusted_rel = safe_rel_path;
+        if (strip_root && strip_root_len > 0) {
+            if (strcmp(safe_rel_path, strip_root) == 0) {
+                adjusted_rel = "";
+            } else if (strncmp(safe_rel_path, strip_root, strip_root_len) == 0
+                       && safe_rel_path[strip_root_len] == '/') {
+                adjusted_rel = safe_rel_path + strip_root_len + 1;
+            }
+        }
+
+        char* full_path = path_join(output_root, adjusted_rel);
         if (!full_path) {
             fprintf(stderr, "Out of memory expanding archive path\n");
+            free(rel_trimmed_buf);
             result = -1;
             break;
         }
@@ -597,8 +650,10 @@ static int extract_tar_stream(FILE* stream, compression_algorithm algorithm, con
         archive_entry_set_pathname(entry, full_path);
         free(full_path);
 
+        free(rel_trimmed_buf);
+
         int w = archive_write_header(writer, entry);
-        if (w != ARCHIVE_OK) {
+        if (w != ARCHIVE_OK && w != ARCHIVE_WARN) {
             fprintf(stderr, "Failed to materialize '%s': %s\n", rel_path, archive_error_string(writer));
             result = -1;
             break;
@@ -641,6 +696,8 @@ static int extract_tar_stream(FILE* stream, compression_algorithm algorithm, con
     archive_read_free(reader);
     archive_write_close(writer);
     archive_write_free(writer);
+
+    free(strip_root);
 
     return result;
 }
