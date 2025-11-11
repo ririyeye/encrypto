@@ -8,6 +8,7 @@
 
 - 安装 [xmake](https://xmake.io/)。
 - Python 环境需可运行仓库根目录下的脚本，并已安装 [PyCryptodome](https://pycryptodome.readthedocs.io/)；如使用虚拟环境，请在调用脚本前激活。
+- 不需要额外的 `openssl` 可执行文件，密钥生成完全由 PyCryptodome 负责。
 
 ```bash
 python -m pip install pycryptodome
@@ -67,7 +68,7 @@ AES-GCM 固定使用 32 字节会话密钥、12 字节 IV、16 字节 Tag，并�
 
 ## 目录速览
 
-- `src/`：四个 CLI 的实现及密钥数据绑定。
+- `src/`：CLI 的实现及密钥数据绑定。
 - `scripts/`：密钥生成与端到端测试脚本。
 - `build/generated/`：构建时生成的密钥头文件（自动维护）。
 - `install/bin/`：`xmake install` 产出的可执行文件。
