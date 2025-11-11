@@ -478,15 +478,65 @@ static int archive_add_path(struct archive* archive,
     return result;
 }
 
+static char* derive_default_output_path(const char* input_path)
+{
+    if (!input_path) {
+        return NULL;
+    }
+
+    char* base = path_basename_dup(input_path);
+    if (!base) {
+        return NULL;
+    }
+
+    if (strcmp(base, ".") == 0 || base[0] == '\0') {
+        free(base);
+        base = string_dup("output");
+        if (!base) {
+            return NULL;
+        }
+    }
+
+    size_t base_len = strlen(base);
+    size_t total    = base_len + 4 + 1;
+    char*  out      = (char*)malloc(total);
+    if (!out) {
+        free(base);
+        return NULL;
+    }
+
+    memcpy(out, base, base_len);
+    memcpy(out + base_len, ".bin", 5);
+
+    free(base);
+    return out;
+}
+
 int main(int argc, char** argv)
 {
-    if (argc != 3) {
-        fprintf(stderr, "Usage: %s <input_path> <output_path|->\n", argv[0]);
+    if (argc != 2 && argc != 3) {
+        fprintf(stderr, "Usage: %s <input_path> [output_path|-]\n", argv[0]);
         return 1;
     }
 
-    const char* input_path  = argv[1];
-    const char* output_path = argv[2];
+    const char* input_path = argv[1];
+    const char* output_path;
+    char*       owned_output_path = NULL;
+
+    if (argc == 2) {
+        if (strcmp(input_path, "-") == 0) {
+            fprintf(stderr, "Streaming input '-' is not supported when compression is enabled\n");
+            return 1;
+        }
+        owned_output_path = derive_default_output_path(input_path);
+        if (!owned_output_path) {
+            fprintf(stderr, "Failed to derive default output path\n");
+            return 1;
+        }
+        output_path = owned_output_path;
+    } else {
+        output_path = argv[2];
+    }
 
     FILE*           fout            = NULL;
     FILE*           payload_stream  = NULL;
@@ -498,17 +548,20 @@ int main(int argc, char** argv)
     char*           archive_root    = NULL;
 
     if (strcmp(input_path, "-") == 0) {
+        free(owned_output_path);
         fprintf(stderr, "Streaming input '-' is not supported when compression is enabled\n");
         return 1;
     }
 
     struct stat input_stat;
     if (lstat(input_path, &input_stat) != 0) {
+        free(owned_output_path);
         perror("Failed to stat input path");
         return 1;
     }
 
     if (!S_ISREG(input_stat.st_mode) && !S_ISDIR(input_stat.st_mode) && !S_ISLNK(input_stat.st_mode)) {
+        free(owned_output_path);
         fprintf(stderr, "Unsupported input type for '%s'\n", input_path);
         return 1;
     }
@@ -518,6 +571,7 @@ int main(int argc, char** argv)
     } else {
         fout = fopen(output_path, "wb+");
         if (!fout) {
+            free(owned_output_path);
             perror("Failed to open output file");
             return 1;
         }
@@ -536,6 +590,7 @@ int main(int argc, char** argv)
             if (close_output) {
                 fclose(fout);
             }
+            free(owned_output_path);
             return 1;
         }
         payload_stream = payload_tmp;
@@ -903,6 +958,8 @@ cleanup:
     if (ret != 0 && close_output) {
         remove(output_path);
     }
+
+    free(owned_output_path);
 
     return ret;
 }

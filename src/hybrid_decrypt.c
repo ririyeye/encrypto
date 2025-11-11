@@ -10,6 +10,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <archive.h>
@@ -176,6 +177,46 @@ static char* string_dup(const char* src)
     return out;
 }
 
+static char* path_basename_dup(const char* path)
+{
+    if (!path) {
+        return NULL;
+    }
+    size_t len = strlen(path);
+    while (len > 0 && path[len - 1] == '/') {
+        len--;
+    }
+    if (len == 0) {
+        char* dot = (char*)malloc(2);
+        if (!dot) {
+            return NULL;
+        }
+        dot[0] = '.';
+        dot[1] = '\0';
+        return dot;
+    }
+    const char* end   = path + len;
+    const char* start = path;
+    for (const char* p = end; p != path; --p) {
+        if (*(p - 1) == '/') {
+            start = p;
+            break;
+        }
+    }
+    size_t base_len = (size_t)(end - start);
+    if (base_len == 0) {
+        base_len = len;
+        start    = path;
+    }
+    char* result = (char*)malloc(base_len + 1);
+    if (!result) {
+        return NULL;
+    }
+    memcpy(result, start, base_len);
+    result[base_len] = '\0';
+    return result;
+}
+
 static char* path_join(const char* lhs, const char* rhs)
 {
     size_t lhs_len    = lhs ? strlen(lhs) : 0;
@@ -200,6 +241,117 @@ static char* path_join(const char* lhs, const char* rhs)
     }
     out[offset] = '\0';
     return out;
+}
+
+static int path_exists(const char* path)
+{
+    if (!path) {
+        return 0;
+    }
+    struct stat st;
+    return stat(path, &st) == 0;
+}
+
+static unsigned int random_suffix_value(void)
+{
+    static int          seeded = 0;
+    static unsigned int state  = 0;
+    if (!seeded) {
+        unsigned int    seed = (unsigned int)getpid();
+        struct timespec ts;
+        if (clock_gettime(CLOCK_REALTIME, &ts) == 0) {
+            seed ^= (unsigned int)ts.tv_nsec;
+            seed ^= (unsigned int)ts.tv_sec;
+        } else {
+            seed ^= (unsigned int)time(NULL);
+        }
+        srand(seed);
+        state  = (unsigned int)rand();
+        seeded = 1;
+    }
+    state = (unsigned int)rand();
+    return state;
+}
+
+static char* ensure_unique_auto_output(char* base_path)
+{
+    if (!base_path) {
+        return NULL;
+    }
+
+    if (!path_exists(base_path)) {
+        return base_path;
+    }
+
+    const size_t base_len = strlen(base_path);
+    const size_t max_rand = 64;
+    for (size_t attempt = 0; attempt < max_rand; ++attempt) {
+        unsigned int value = random_suffix_value();
+        char         suffix[32];
+        int          suffix_len = snprintf(suffix, sizeof(suffix), "_%u", value);
+        if (suffix_len <= 0 || (size_t)suffix_len >= sizeof(suffix)) {
+            continue;
+        }
+        size_t total     = base_len + (size_t)suffix_len + 1;
+        char*  candidate = (char*)malloc(total);
+        if (!candidate) {
+            break;
+        }
+        memcpy(candidate, base_path, base_len);
+        memcpy(candidate + base_len, suffix, (size_t)suffix_len + 1);
+        if (!path_exists(candidate)) {
+            free(base_path);
+            return candidate;
+        }
+        free(candidate);
+    }
+
+    for (unsigned int idx = 1; idx < 100000; ++idx) {
+        char suffix[32];
+        int  suffix_len = snprintf(suffix, sizeof(suffix), "_%u", idx);
+        if (suffix_len <= 0 || (size_t)suffix_len >= sizeof(suffix)) {
+            continue;
+        }
+        size_t total     = base_len + (size_t)suffix_len + 1;
+        char*  candidate = (char*)malloc(total);
+        if (!candidate) {
+            break;
+        }
+        memcpy(candidate, base_path, base_len);
+        memcpy(candidate + base_len, suffix, (size_t)suffix_len + 1);
+        if (!path_exists(candidate)) {
+            free(base_path);
+            return candidate;
+        }
+        free(candidate);
+    }
+
+    return base_path;
+}
+
+static char* derive_default_output_dir(const char* input_path)
+{
+    if (!input_path) {
+        return NULL;
+    }
+
+    char* base = path_basename_dup(input_path);
+    if (!base) {
+        return NULL;
+    }
+
+    size_t base_len = strlen(base);
+    if (base_len > 4 && memcmp(base + base_len - 4, ".bin", 4) == 0) {
+        base[base_len - 4] = '\0';
+        base_len -= 4;
+    }
+
+    if (strcmp(base, ".") == 0 || base[0] == '\0') {
+        free(base);
+        base = string_dup("output");
+    }
+
+    return base;
 }
 
 static int mkdir_recursive(const char* path)
@@ -410,15 +562,35 @@ static int extract_tar_gz(FILE* stream, const char* output_root)
 
 int main(int argc, char** argv)
 {
-    if (argc != 3) {
-        fprintf(stderr, "Usage: %s <input|-> <output_dir>\n", argv[0]);
+    if (argc != 2 && argc != 3) {
+        fprintf(stderr, "Usage: %s <input|-> [output_dir]\n", argv[0]);
         return 1;
     }
 
-    const char* input_path  = argv[1];
-    const char* output_path = argv[2];
+    const char* input_path = argv[1];
+    const char* output_path;
+    char*       owned_output_path = NULL;
+    int         auto_output       = (argc == 2);
+
+    if (auto_output) {
+        if (strcmp(input_path, "-") == 0) {
+            fprintf(stderr, "Directory extraction requires a filesystem path for output\n");
+            return 1;
+        }
+        owned_output_path = derive_default_output_dir(input_path);
+        if (!owned_output_path) {
+            fprintf(stderr, "Failed to derive default output directory\n");
+            return 1;
+        }
+        output_path = owned_output_path;
+    } else {
+        output_path = argv[2];
+    }
 
     if (strcmp(output_path, "-") == 0) {
+        if (owned_output_path) {
+            free(owned_output_path);
+        }
         fprintf(stderr, "Directory extraction requires a filesystem path for output\n");
         return 1;
     }
@@ -432,6 +604,7 @@ int main(int argc, char** argv)
     } else {
         fin = fopen(input_path, "rb");
         if (!fin) {
+            free(owned_output_path);
             perror("Failed to open input file");
             return 1;
         }
@@ -708,6 +881,16 @@ int main(int argc, char** argv)
         goto cleanup;
     }
 
+    if (auto_output) {
+        char* unique = ensure_unique_auto_output(owned_output_path);
+        if (!unique) {
+            fprintf(stderr, "Failed to allocate unique output directory name\n");
+            goto cleanup;
+        }
+        owned_output_path = unique;
+        output_path       = owned_output_path;
+    }
+
     if (mkdir_recursive(output_path) != 0) {
         if (errno == EEXIST) {
             fprintf(stderr, "Output directory '%s' already exists\n", output_path);
@@ -774,6 +957,10 @@ cleanup:
 
     if (ret != 0 && output_dir_created) {
         remove_tree_quiet(output_path);
+    }
+
+    if (owned_output_path) {
+        free(owned_output_path);
     }
 
     return ret;
