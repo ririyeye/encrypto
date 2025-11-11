@@ -241,7 +241,7 @@ int main(int argc, char** argv)
         mbedtls_ctr_drbg_init(&ctr_drbg);
         ctr_drbg_ready = 1;
 
-        const char* pers = "hybrid_decrypt";
+        const char* pers = "dec";
         err              = mbedtls_ctr_drbg_seed(&ctr_drbg,
                                     mbedtls_entropy_func,
                                     &entropy,

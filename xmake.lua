@@ -57,14 +57,14 @@ target("key_data")
     add_includedirs("$(builddir)/generated")
 
 
-target("hybrid_encrypt")
+target("enc")
     set_kind("binary")
     add_files("src/hybrid_encrypt.c")
     add_packages("mbedtls")
     add_deps("key_data")
 
 
-target("hybrid_decrypt")
+target("dec")
     set_kind("binary")
     add_files("src/hybrid_decrypt.c")
     add_packages("mbedtls")

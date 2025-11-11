@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """End-to-end tests for the hybrid CLI utilities.
 
-The script builds the hybrid_encrypt/hybrid_decrypt binaries, prepares payloads of
+The script builds the enc/dec binaries, prepares payloads of
 various sizes, and verifies container integrity with PyCryptodome. It also
 exercises deterministic randomness via ENCRYPTO_TEST_RANDOM_PATH to keep output
 stable across runs.
@@ -169,12 +169,12 @@ def write_bytes(path: Path, data: bytes) -> None:
 
 
 def execute_tests(repo_root: Path, sizes: Sequence[int]) -> None:
-    targets: List[str] = ["hybrid_encrypt", "hybrid_decrypt"]
+    targets: List[str] = ["enc", "dec"]
 
     ensure_built(repo_root, targets)
 
-    hybrid_encrypt_path: Path = resolve_target(repo_root, "hybrid_encrypt")
-    hybrid_decrypt_path: Path = resolve_target(repo_root, "hybrid_decrypt")
+    enc_path: Path = resolve_target(repo_root, "enc")
+    dec_path: Path = resolve_target(repo_root, "dec")
     generated_dir = repo_root / "build" / "generated"
     priv_pem = generated_dir / "rsa_private.pem"
     pub_pem = generated_dir / "rsa_public.pem"
@@ -200,7 +200,7 @@ def execute_tests(repo_root: Path, sizes: Sequence[int]) -> None:
             write_bytes(random_path, random_bytes)
 
             container_path = tmpdir / f"hy_enc_{size}.bin"
-            run_cli(hybrid_encrypt_path, plain_path, container_path, random_path)
+            run_cli(enc_path, plain_path, container_path, random_path)
 
             header, rsa_ct, iv, ciphertext, tag = read_hybrid_container(container_path, private_key)
             cipher_len_header = int.from_bytes(header[9:17], "big")
@@ -216,7 +216,7 @@ def execute_tests(repo_root: Path, sizes: Sequence[int]) -> None:
                 raise AssertionError(f"Hybrid container mismatch for payload size {size}")
 
             roundtrip_path = tmpdir / f"hy_roundtrip_{size}.bin"
-            run_cli(hybrid_decrypt_path, container_path, roundtrip_path, random_path)
+            run_cli(dec_path, container_path, roundtrip_path, random_path)
             if load_bytes(roundtrip_path) != plaintext:
                 raise AssertionError(f"Hybrid decrypt mismatch for payload size {size}")
 

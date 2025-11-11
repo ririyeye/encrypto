@@ -2,7 +2,7 @@
 
 ## 项目简介
 
-本项目使用 mbedtls 实现两个 C99 CLI 工具：`hybrid_encrypt`、`hybrid_decrypt`。所有可执行文件都会在构建时内嵌密钥数据，`src/key_data.c` 输出的数组被统一复用。混合方案通过固定 17 字节的 `ENHY` 头部，将 AES-GCM 载荷封装在 RSA OAEP 信封内。
+本项目使用 mbedtls 实现两个 C99 CLI 工具：`enc`、`dec`。所有可执行文件都会在构建时内嵌密钥数据，`src/key_data.c` 输出的数组被统一复用。混合方案通过固定 17 字节的 `ENHY` 头部，将 AES-GCM 载荷封装在 RSA OAEP 信封内。
 
 ## 先决条件
 
@@ -19,7 +19,7 @@ python -m pip install pycryptodome
 
 ```bash
 xmake            # 构建所有目标
-xmake build hybrid_encrypt
+xmake build enc
 ```
 
 > ⚠️ 请勿直接修改 `build/generated/` 内的文件，若需调整密钥或格式，请更新脚本或源 PEM。
@@ -30,8 +30,8 @@ xmake build hybrid_encrypt
 
 所有 CLI 均以 `main(argc == 3, input, output)` 形式接收参数，参数不符时会输出 `Usage:` 提示。
 
-- `hybrid_encrypt <input> <output>`：利用 RSA+AES-GCM 混合方案加密文件，输出包含 `ENHY` 头的容器。
-- `hybrid_decrypt <input> <output>`：校验并解密混合容器，恢复原始明文。
+- `enc <input> <output>`：利用 RSA+AES-GCM 混合方案加密文件，输出包含 `ENHY` 头的容器。
+- `dec <input> <output>`：校验并解密混合容器，恢复原始明文。
 
 ## 测试
 
