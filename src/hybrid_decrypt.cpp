@@ -65,7 +65,7 @@ static int random_stream_load(const char* path, random_stream* stream)
 
     fclose(fp);
 
-    stream->length = (size_t)size;
+    stream->length = static_cast<size_t>(size);
     stream->offset = 0;
     return 0;
 }
