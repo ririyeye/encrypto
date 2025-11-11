@@ -2,7 +2,7 @@
 
 ## 项目简介
 
-本项目使用 mbedtls 实现两个 C99 CLI 工具：`enc`、`dec`。所有可执行文件都会在构建时内嵌密钥数据，`src/key_data.c` 输出的数组被统一复用。混合方案通过固定 17 字节的 `ENHY` 头部，将 AES-GCM 载荷封装在 RSA OAEP 信封内。
+本项目使用 mbedtls 实现两个 C++ CLI 工具：`enc`、`dec`。所有可执行文件都会在构建时内嵌密钥数据，`src/key_data.cpp` 输出的数组被统一复用。混合方案通过固定 17 字节的 `ENHY` 头部，将 AES-GCM 载荷封装在 RSA OAEP 信封内。
 
 ## 先决条件
 
