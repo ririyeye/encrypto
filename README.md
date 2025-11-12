@@ -7,25 +7,21 @@
 ## 先决条件
 
 - 安装 [xmake](https://xmake.io/)。
-- Python 环境需可运行仓库根目录下的脚本，并已安装 [PyCryptodome](https://pycryptodome.readthedocs.io/)；如使用虚拟环境，请在调用脚本前激活。
-- 不需要额外的 `openssl` 可执行文件，密钥生成完全由 PyCryptodome 负责。
-- 编译依赖 [libarchive](https://www.libarchive.org/)，xmake 会自动拉取并构建；如希望使用系统库，请确保安装对应的开发包。
-- 若需使用 `zstd`/`lz4`/`lzop` 等附加算法，请确认本地 libarchive 已启用相应 filter（项目默认拉取的静态依赖已包含所需支持）。
+- 准备可运行仓库脚本的 Python 环境，并安装 [PyCryptodome](https://pycryptodome.readthedocs.io/)；如使用虚拟环境，请先激活。
+- 密钥生成完全由 PyCryptodome 负责，无需安装额外的 `openssl` 可执行文件。
+- 依赖 [libarchive](https://www.libarchive.org/) 及其 filter 支持；项目默认拉取的静态依赖已包含 `zstd`/`lz4`/`lzop` 等算法，若改用系统库，请确保开发包齐全。
 
 ```bash
 python -m pip install pycryptodome
 ```
-
 ## 构建
 
-执行下列任意命令都会触发自定义 `generate_keys` 规则，从而调用 `scripts/generate_keys.py` 利用 PyCryptodome 生成 PEM 与 `build/generated/` 下的 `rsa_private_key.h`、`rsa_public_key.h`：
+执行下列任意命令都会触发自定义 `generate_keys` 规则，从而调用 `scripts/generate_keys.py` 利用 PyCryptodome 生成 PEM 与 `build/generated/` 下的 `rsa_private_key.h`、`rsa_public_key.h`（头文件内嵌 DER 字节流，便于避免二进制中出现 PEM 文本标记）：
 
 ```bash
 xmake            # 构建所有目标
 xmake build enc
 ```
-
-> ⚠️ 请勿直接修改 `build/generated/` 内的文件，若需调整密钥或格式，请更新脚本或源 PEM。
 
 目标二进制可通过 `xmake show -t <target>` 查询路径，最终安装物位于 `install/bin/`。
 
@@ -39,16 +35,17 @@ xmake build enc
 
 ## 测试
 
-测试脚本覆盖文件与目录两类输入：除随机生成的文件载荷外，还会对 `tmp/pyOCD/` 目录执行“打包 → 压缩 → 加密”流程，验证 CLI 输出与 Python 参考实现的二进制完全一致，并检查解密后目录结构无差异。
+测试脚本覆盖文件与目录两类输入：默认跑一组随机文件载荷；如需再验证目录或完整树形结构，可通过参数手动指定目录，脚本会对其执行“打包 → 压缩 → 加密”流程，确保 CLI 输出与 Python 参考实现比对一致并验证解密结果。
 
 ```bash
 pip install pycryptodome
-python scripts/test_rsa_cli.py
+python scripts/test_rsa_cli.py               # 仅文件载荷
+python scripts/test_rsa_cli.py --directory src  # 额外验证目录 round-trip
 ```
 
 脚本依赖 `xmake show -t <target>` 获取二进制路径，并在 `build/` 中写入临时数据。
 
-> 默认情况下测试脚本会将 `ENCRYPTO_COMPRESSION` 固定为 `gzip` 以复用 Python 参考实现的产出。如需覆盖其他算法，可在运行前设置 `ENCRYPTO_TEST_COMPRESSION=<none|gzip|...>`，脚本会透传到 CLI 并比对相应容器（目前参考实现仅覆盖 `gzip`/`none`）。
+> 默认情况下测试脚本会将 `ENCRYPTO_COMPRESSION` 固定为 `gzip` 以复用 Python 参考实现的产出。如需覆盖其他算法，可在运行前设置 `ENCRYPTO_TEST_COMPRESSION=<none|gzip|...>`，脚本会透传到 CLI 并比对相应容器（目前参考实现仅覆盖 `gzip`/`none`，目录模式同样遵循这一约束）。
 
 ## 确定性随机数模式
 

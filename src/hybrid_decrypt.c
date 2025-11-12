@@ -1059,15 +1059,14 @@ int main(int argc, char** argv)
     mbedtls_gcm_init(&gcm);
 
     priv_size = key_data_private_size();
-    priv_buf  = (unsigned char*)malloc(priv_size + 1);
+    priv_buf  = (unsigned char*)malloc(priv_size);
     if (!priv_buf) {
         fprintf(stderr, "Out of memory allocating private key buffer\n");
         goto cleanup;
     }
     memcpy(priv_buf, key_data_private(), priv_size);
-    priv_buf[priv_size] = '\0';
 
-    int err = mbedtls_pk_parse_key(&pk, priv_buf, priv_size + 1, NULL, 0, NULL, NULL);
+    int err = mbedtls_pk_parse_key(&pk, priv_buf, priv_size, NULL, 0, NULL, NULL);
     if (err != 0) {
         print_mbedtls_error("Failed to parse private key", err);
         goto cleanup;

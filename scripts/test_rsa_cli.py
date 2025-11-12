@@ -374,7 +374,9 @@ def compare_directories(lhs: Path, rhs: Path) -> None:
                 raise AssertionError(f"Symlink target mismatch for '{rel}'")
 
 
-def execute_tests(repo_root: Path, sizes: Sequence[int], compression: str | None) -> None:
+def execute_tests(
+    repo_root: Path, sizes: Sequence[int], compression: str | None, directory_payload: Path | None
+) -> None:
     try:
         compression = normalize_compression(compression)
     except ValueError as exc:
@@ -403,9 +405,10 @@ def execute_tests(repo_root: Path, sizes: Sequence[int], compression: str | None
     key_len = public_key.size_in_bytes()
     random_len = max(4 * key_len * 4, 1 << 16)
 
-    pyocd_root = (repo_root / "tmp" / "pyOCD").resolve()
-    if not pyocd_root.is_dir():
-        raise SystemExit(f"Expected directory payload at {pyocd_root}")
+    if directory_payload is not None:
+        directory_payload = directory_payload.resolve()
+        if not directory_payload.exists():
+            raise SystemExit(f"Directory payload '{directory_payload}' does not exist")
 
     with tempfile.TemporaryDirectory() as tmpdirname:
         tmpdir = Path(tmpdirname)
@@ -444,32 +447,46 @@ def execute_tests(repo_root: Path, sizes: Sequence[int], compression: str | None
 
             print(f"[OK] file payload of {size} bytes round-tripped")
 
-        tar_payload = build_tar_payload(pyocd_root, compression)
-        random_bytes = os.urandom(random_len)
-        random_path = tmpdir / "hy_rand_pyocd.bin"
-        write_bytes(random_path, random_bytes)
+        if directory_payload is not None:
+            tar_payload = build_tar_payload(directory_payload, compression)
+            random_bytes = os.urandom(random_len)
+            random_path = tmpdir / "hy_rand_dir.bin"
+            write_bytes(random_path, random_bytes)
 
-        python_container = build_python_container(
-            public_key, RandomByteStream(random_bytes), tar_payload, compression
-        )
+            python_container = build_python_container(
+                public_key, RandomByteStream(random_bytes), tar_payload, compression
+            )
 
-        container_path = tmpdir / "hy_enc_pyocd.bin"
-        run_cli(enc_path, pyocd_root, container_path, random_path, compression)
+            container_path = tmpdir / "hy_enc_dir.bin"
+            run_cli(enc_path, directory_payload, container_path, random_path, compression)
 
-        cli_container = load_bytes(container_path)
-        if cli_container != python_container:
-            raise AssertionError("Compressed+encrypted pyOCD container mismatch")
+            cli_container = load_bytes(container_path)
+            if cli_container != python_container:
+                raise AssertionError("Compressed+encrypted directory payload mismatch")
 
-        roundtrip_dir = tmpdir / "hy_roundtrip_pyocd"
-        run_cli(dec_path, container_path, roundtrip_dir, random_path, compression)
-        extracted_root = roundtrip_dir / pyocd_root.name
-        if not extracted_root.exists():
-            raise AssertionError("Decrypted pyOCD root not found")
-        compare_directories(pyocd_root, extracted_root)
+            roundtrip_root = tmpdir / "hy_roundtrip_dir"
+            run_cli(dec_path, container_path, roundtrip_root, random_path, compression)
 
-        print("[OK] pyOCD directory round-trip verified")
+            if directory_payload.is_dir():
+                expected_root = roundtrip_root
+                if not expected_root.exists():
+                    raise AssertionError("Decrypted directory root not found")
+                compare_directories(directory_payload, expected_root)
+            else:
+                expected_root = roundtrip_root / directory_payload.name
+                if not expected_root.is_file():
+                    raise AssertionError("Decrypted file not found for directory payload")
+                if load_bytes(expected_root) != load_bytes(directory_payload):
+                    raise AssertionError("Decrypted file mismatch for directory payload")
 
-    print(f"All {len(sizes)} file payload cases passed; pyOCD directory verified")
+            print(
+                f"[OK] directory payload '{directory_payload.name}' round-trip verified"
+            )
+
+    summary = f"All {len(sizes)} file payload cases passed"
+    if directory_payload is not None:
+        summary += f"; directory '{directory_payload}' verified"
+    print(summary)
 
 
 def main(argv: Sequence[str]) -> int:
@@ -481,6 +498,12 @@ def main(argv: Sequence[str]) -> int:
         nargs="*",
         help="List of payload sizes to test (default: 10B..10MB assortment)",
     )
+    parser.add_argument(
+        "--directory",
+        type=Path,
+        help="Optional directory payload to validate (default: skip directory test)",
+    )
+
     args = parser.parse_args(argv)
 
     if args.sizes:
@@ -500,7 +523,7 @@ def main(argv: Sequence[str]) -> int:
 
     repo_root = Path(__file__).resolve().parents[1]
     compression = os.environ.get("ENCRYPTO_TEST_COMPRESSION")
-    execute_tests(repo_root, sizes, compression)
+    execute_tests(repo_root, sizes, compression, args.directory)
     return 0
 
 

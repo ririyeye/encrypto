@@ -845,15 +845,14 @@ int main(int argc, char** argv)
     mbedtls_gcm_init(&gcm);
 
     size_t pub_size = key_data_public_size();
-    pub_buf         = (unsigned char*)malloc(pub_size + 1);
+    pub_buf         = (unsigned char*)malloc(pub_size);
     if (!pub_buf) {
         fprintf(stderr, "Out of memory allocating public key buffer\n");
         goto cleanup;
     }
     memcpy(pub_buf, key_data_public(), pub_size);
-    pub_buf[pub_size] = '\0';
 
-    int err = mbedtls_pk_parse_public_key(&pk, pub_buf, pub_size + 1);
+    int err = mbedtls_pk_parse_public_key(&pk, pub_buf, pub_size);
     if (err != 0) {
         print_mbedtls_error("Failed to parse public key", err);
         goto cleanup;

@@ -42,7 +42,7 @@ def _write_header_bytes(data: bytes, header_path: str, symbol: str) -> None:
     line = "    "
     for idx, byte in enumerate(data, start=1):
         line += f"0x{byte:02X},"
-        if idx % 12 == 0:
+        if idx % 8 == 0:
             lines.append(line.rstrip())
             line = "    "
         else:
@@ -61,11 +61,8 @@ def _write_header_bytes(data: bytes, header_path: str, symbol: str) -> None:
         fp.write("\n".join(lines))
 
 
-def _generate_rsa_keypair() -> tuple[bytes, bytes]:
-    key = RSA.generate(KEY_BITS, e=PUBLIC_EXPONENT)
-    private_pem = key.export_key(format="PEM")
-    public_pem = key.public_key().export_key(format="PEM")
-    return private_pem, public_pem
+def _generate_rsa_keypair() -> "RSA.RsaKey":
+    return RSA.generate(KEY_BITS, e=PUBLIC_EXPONENT)
 
 
 def main() -> int:
@@ -86,15 +83,22 @@ def main() -> int:
     for path in (priv_header, pub_header):
         _ensure_parent(path)
 
-    private_pem, public_pem = _generate_rsa_keypair()
+    private_key = _generate_rsa_keypair()
+    public_key = private_key.public_key()
+
+    private_pem = private_key.export_key(format="PEM")
+    public_pem = public_key.export_key(format="PEM")
+
+    private_der = private_key.export_key(format="DER")
+    public_der = public_key.export_key(format="DER")
 
     with open(priv_path, "wb") as fp:
         fp.write(private_pem)
     with open(pub_path, "wb") as fp:
         fp.write(public_pem)
 
-    _write_header_bytes(private_pem, priv_header, "g_rsa_private_key")
-    _write_header_bytes(public_pem, pub_header, "g_rsa_public_key")
+    _write_header_bytes(private_der, priv_header, "g_rsa_private_key")
+    _write_header_bytes(public_der, pub_header, "g_rsa_public_key")
 
     return 0
 
