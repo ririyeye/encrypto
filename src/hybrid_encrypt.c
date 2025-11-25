@@ -6,6 +6,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <locale.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -721,6 +722,8 @@ static char* derive_default_output_path(const char* input_path)
 
 int main(int argc, char** argv)
 {
+    setlocale(LC_ALL, "");
+
     if (argc != 2 && argc != 3) {
         fprintf(stderr, "Usage: %s <input_path> [output_path|-]\n", argv[0]);
         return 1;

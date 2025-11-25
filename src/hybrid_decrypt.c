@@ -5,6 +5,7 @@
 #endif
 
 #include <errno.h>
+#include <locale.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -976,6 +977,8 @@ static int extract_tar_stream(FILE* stream, compression_algorithm algorithm, con
 
 int main(int argc, char** argv)
 {
+    setlocale(LC_ALL, "");
+
     if (argc != 2 && argc != 3) {
         fprintf(stderr, "Usage: %s <input|-> [output_dir]\n", argv[0]);
         return 1;
