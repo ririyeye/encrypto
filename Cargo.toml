@@ -21,10 +21,16 @@ path = "src/bin/dec.rs"
 [[bin]]
 name = "win-in"
 path = "src/bin/win_in.rs"
+required-features = ["windows-gui"]
 
 [[bin]]
 name = "win-out"
 path = "src/bin/win_out.rs"
+required-features = ["windows-gui"]
+
+[features]
+default = []
+windows-gui = []
 
 [dependencies]
 # RSA encryption
