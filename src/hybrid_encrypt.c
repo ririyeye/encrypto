@@ -189,7 +189,6 @@ typedef enum compression_algorithm {
     COMPRESSION_GZIP    = 1,
     COMPRESSION_ZSTD    = 2,
     COMPRESSION_LZ4     = 3,
-    COMPRESSION_LZOP    = 4,
     COMPRESSION_INVALID = 255
 } compression_algorithm;
 
@@ -204,8 +203,6 @@ static const char* compression_algorithm_name(compression_algorithm algo)
         return "zstd";
     case COMPRESSION_LZ4:
         return "lz4";
-    case COMPRESSION_LZOP:
-        return "lzop";
     default:
         return "invalid";
     }
@@ -252,10 +249,6 @@ static int parse_compression_algorithm(const char* value, compression_algorithm*
         *out = COMPRESSION_LZ4;
         return 0;
     }
-    if (strings_equal_icase(value, "lzop") || strings_equal_icase(value, "lzo")) {
-        *out = COMPRESSION_LZOP;
-        return 0;
-    }
 
     return -1;
 }
@@ -271,8 +264,6 @@ static int compression_algorithm_to_id(compression_algorithm algo)
         return 2;
     case COMPRESSION_LZ4:
         return 3;
-    case COMPRESSION_LZOP:
-        return 4;
     default:
         return -1;
     }
@@ -314,12 +305,6 @@ static int configure_archive_filter(struct archive* writer, compression_algorith
         r = archive_write_add_filter_lz4(writer);
         if (r == ARCHIVE_OK || r == ARCHIVE_WARN) {
             archive_write_set_filter_option(writer, "lz4", "compression-level", "1");
-        }
-        break;
-    case COMPRESSION_LZOP:
-        r = archive_write_add_filter_lzop(writer);
-        if (r == ARCHIVE_OK || r == ARCHIVE_WARN) {
-            archive_write_set_filter_option(writer, "lzop", "compression-level", "1");
         }
         break;
     default:

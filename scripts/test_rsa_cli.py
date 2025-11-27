@@ -134,8 +134,6 @@ def normalize_compression(value: str | None) -> str:
         return "gzip"
     if key in {"zstd", "zst"}:
         return "zstd"
-    if key in {"lzop", "lzo"}:
-        return "lzop"
     if key in {"none", "raw", "tar"}:
         return "none"
     if key == "lz4":
@@ -149,7 +147,6 @@ def compression_to_id(name: str) -> int:
         "gzip": 1,
         "zstd": 2,
         "lz4": 3,
-        "lzop": 4,
     }
     if name not in lookup:
         raise ValueError(f"unknown compression '{name}'")
@@ -375,35 +372,55 @@ def compare_directories(lhs: Path, rhs: Path) -> None:
 
 
 def execute_tests(
-    repo_root: Path, sizes: Sequence[int], compression: str | None, directory_payload: Path | None
+    repo_root: Path, sizes: Sequence[int], compression: str | None, directory_payload: Path | None,
+    rust_mode: bool = False
 ) -> None:
     try:
         compression = normalize_compression(compression)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 
-    if compression not in {"gzip", "none"}:
-        raise SystemExit(
-            "python reference harness only supports ENCRYPTO_COMPRESSION in {gzip, none}; "
-            "set ENCRYPTO_TEST_COMPRESSION=gzip to match the reference output"
-        )
-    targets: List[str] = ["enc", "dec"]
+    if rust_mode:
+        # Rust 版本测试：只做 round-trip 验证，不做确定性比对
+        # 因为 Rust 版本使用不同的密钥
+        rust_dir = repo_root / "rust"
+        enc_path = rust_dir / "target" / "release" / "enc"
+        dec_path = rust_dir / "target" / "release" / "dec"
+        
+        if not enc_path.exists() or not dec_path.exists():
+            print("Building Rust binaries...")
+            run(["cargo", "build", "--release"], cwd=rust_dir)
+        
+        if not enc_path.exists():
+            raise SystemExit(f"Rust enc binary not found: {enc_path}")
+        if not dec_path.exists():
+            raise SystemExit(f"Rust dec binary not found: {dec_path}")
+        
+        print(f"Testing Rust version (compression: {compression})")
+    else:
+        if compression not in {"gzip", "none"}:
+            raise SystemExit(
+                "python reference harness only supports ENCRYPTO_COMPRESSION in {gzip, none}; "
+                "set ENCRYPTO_TEST_COMPRESSION=gzip to match the reference output"
+            )
+        targets: List[str] = ["enc", "dec"]
 
-    ensure_built(repo_root, targets)
+        ensure_built(repo_root, targets)
 
-    enc_path: Path = resolve_target(repo_root, "enc")
-    dec_path: Path = resolve_target(repo_root, "dec")
-    generated_dir = repo_root / "build" / "generated"
-    priv_pem = generated_dir / "rsa_private.pem"
-    pub_pem = generated_dir / "rsa_public.pem"
+        enc_path: Path = resolve_target(repo_root, "enc")
+        dec_path: Path = resolve_target(repo_root, "dec")
+        generated_dir = repo_root / "build" / "generated"
+        priv_pem = generated_dir / "rsa_private.pem"
+        pub_pem = generated_dir / "rsa_public.pem"
 
-    if not priv_pem.exists() or not pub_pem.exists():
-        raise SystemExit("RSA key material was not generated; run xmake build first")
+        if not priv_pem.exists() or not pub_pem.exists():
+            raise SystemExit("RSA key material was not generated; run xmake build first")
 
-    public_key = RSA.import_key(load_bytes(pub_pem))
+        public_key = RSA.import_key(load_bytes(pub_pem))
 
-    key_len = public_key.size_in_bytes()
-    random_len = max(4 * key_len * 4, 1 << 16)
+    if not rust_mode:
+        key_len = public_key.size_in_bytes()
+        random_len = max(4 * key_len * 4, 1 << 16)
 
     if directory_payload is not None:
         directory_payload = directory_payload.resolve()
@@ -418,66 +435,108 @@ def execute_tests(
             plain_path = tmpdir / f"hy_plain_{size}.bin"
             write_bytes(plain_path, plaintext)
 
-            random_bytes = os.urandom(random_len)
-            random_path = tmpdir / f"hy_rand_file_{size}.bin"
-            write_bytes(random_path, random_bytes)
+            if rust_mode:
+                # Rust 版本：只做 round-trip 测试
+                container_path = tmpdir / f"hy_enc_file_{size}.bin"
+                env = os.environ.copy()
+                if compression:
+                    env["ENCRYPTO_COMPRESSION"] = compression
+                run([str(enc_path), str(plain_path), str(container_path)], env=env)
 
-            tar_payload = build_tar_payload(plain_path, compression)
-            python_container = build_python_container(
-                public_key, RandomByteStream(random_bytes), tar_payload, compression
-            )
+                roundtrip_dir = tmpdir / f"hy_roundtrip_file_{size}"
+                run([str(dec_path), str(container_path), str(roundtrip_dir)], env=env)
+                extracted_file = roundtrip_dir / plain_path.name
+                if not extracted_file.is_file():
+                    raise AssertionError(f"Decrypted file missing for payload size {size}")
+                if load_bytes(extracted_file) != plaintext:
+                    raise AssertionError(f"Decrypted file mismatch for payload size {size}")
+                extra_entries = [p for p in roundtrip_dir.iterdir() if p.name != plain_path.name]
+                if extra_entries:
+                    raise AssertionError(f"Unexpected entries after decrypt: {extra_entries}")
+            else:
+                random_bytes = os.urandom(random_len)
+                random_path = tmpdir / f"hy_rand_file_{size}.bin"
+                write_bytes(random_path, random_bytes)
 
-            container_path = tmpdir / f"hy_enc_file_{size}.bin"
-            run_cli(enc_path, plain_path, container_path, random_path, compression)
+                tar_payload = build_tar_payload(plain_path, compression)
+                python_container = build_python_container(
+                    public_key, RandomByteStream(random_bytes), tar_payload, compression
+                )
 
-            cli_container = load_bytes(container_path)
-            if cli_container != python_container:
-                raise AssertionError(f"Compressed+encrypted mismatch for file payload size {size}")
+                container_path = tmpdir / f"hy_enc_file_{size}.bin"
+                run_cli(enc_path, plain_path, container_path, random_path, compression)
 
-            roundtrip_dir = tmpdir / f"hy_roundtrip_file_{size}"
-            run_cli(dec_path, container_path, roundtrip_dir, random_path, compression)
-            extracted_file = roundtrip_dir / plain_path.name
-            if not extracted_file.is_file():
-                raise AssertionError(f"Decrypted file missing for payload size {size}")
-            if load_bytes(extracted_file) != plaintext:
-                raise AssertionError(f"Decrypted file mismatch for payload size {size}")
-            extra_entries = [p for p in roundtrip_dir.iterdir() if p.name != plain_path.name]
-            if extra_entries:
-                raise AssertionError(f"Unexpected entries after decrypt: {extra_entries}")
+                cli_container = load_bytes(container_path)
+                if cli_container != python_container:
+                    raise AssertionError(f"Compressed+encrypted mismatch for file payload size {size}")
+
+                roundtrip_dir = tmpdir / f"hy_roundtrip_file_{size}"
+                run_cli(dec_path, container_path, roundtrip_dir, random_path, compression)
+                extracted_file = roundtrip_dir / plain_path.name
+                if not extracted_file.is_file():
+                    raise AssertionError(f"Decrypted file missing for payload size {size}")
+                if load_bytes(extracted_file) != plaintext:
+                    raise AssertionError(f"Decrypted file mismatch for payload size {size}")
+                extra_entries = [p for p in roundtrip_dir.iterdir() if p.name != plain_path.name]
+                if extra_entries:
+                    raise AssertionError(f"Unexpected entries after decrypt: {extra_entries}")
 
             print(f"[OK] file payload of {size} bytes round-tripped")
 
         if directory_payload is not None:
-            tar_payload = build_tar_payload(directory_payload, compression)
-            random_bytes = os.urandom(random_len)
-            random_path = tmpdir / "hy_rand_dir.bin"
-            write_bytes(random_path, random_bytes)
+            if rust_mode:
+                # Rust 版本：只做 round-trip 测试
+                container_path = tmpdir / "hy_enc_dir.bin"
+                env = os.environ.copy()
+                if compression:
+                    env["ENCRYPTO_COMPRESSION"] = compression
+                run([str(enc_path), str(directory_payload), str(container_path)], env=env)
 
-            python_container = build_python_container(
-                public_key, RandomByteStream(random_bytes), tar_payload, compression
-            )
+                roundtrip_root = tmpdir / "hy_roundtrip_dir"
+                run([str(dec_path), str(container_path), str(roundtrip_root)], env=env)
 
-            container_path = tmpdir / "hy_enc_dir.bin"
-            run_cli(enc_path, directory_payload, container_path, random_path, compression)
-
-            cli_container = load_bytes(container_path)
-            if cli_container != python_container:
-                raise AssertionError("Compressed+encrypted directory payload mismatch")
-
-            roundtrip_root = tmpdir / "hy_roundtrip_dir"
-            run_cli(dec_path, container_path, roundtrip_root, random_path, compression)
-
-            if directory_payload.is_dir():
-                expected_root = roundtrip_root
-                if not expected_root.exists():
-                    raise AssertionError("Decrypted directory root not found")
-                compare_directories(directory_payload, expected_root)
+                if directory_payload.is_dir():
+                    expected_root = roundtrip_root
+                    if not expected_root.exists():
+                        raise AssertionError("Decrypted directory root not found")
+                    compare_directories(directory_payload, expected_root)
+                else:
+                    expected_root = roundtrip_root / directory_payload.name
+                    if not expected_root.is_file():
+                        raise AssertionError("Decrypted file not found for directory payload")
+                    if load_bytes(expected_root) != load_bytes(directory_payload):
+                        raise AssertionError("Decrypted file mismatch for directory payload")
             else:
-                expected_root = roundtrip_root / directory_payload.name
-                if not expected_root.is_file():
-                    raise AssertionError("Decrypted file not found for directory payload")
-                if load_bytes(expected_root) != load_bytes(directory_payload):
-                    raise AssertionError("Decrypted file mismatch for directory payload")
+                tar_payload = build_tar_payload(directory_payload, compression)
+                random_bytes = os.urandom(random_len)
+                random_path = tmpdir / "hy_rand_dir.bin"
+                write_bytes(random_path, random_bytes)
+
+                python_container = build_python_container(
+                    public_key, RandomByteStream(random_bytes), tar_payload, compression
+                )
+
+                container_path = tmpdir / "hy_enc_dir.bin"
+                run_cli(enc_path, directory_payload, container_path, random_path, compression)
+
+                cli_container = load_bytes(container_path)
+                if cli_container != python_container:
+                    raise AssertionError("Compressed+encrypted directory payload mismatch")
+
+                roundtrip_root = tmpdir / "hy_roundtrip_dir"
+                run_cli(dec_path, container_path, roundtrip_root, random_path, compression)
+
+                if directory_payload.is_dir():
+                    expected_root = roundtrip_root
+                    if not expected_root.exists():
+                        raise AssertionError("Decrypted directory root not found")
+                    compare_directories(directory_payload, expected_root)
+                else:
+                    expected_root = roundtrip_root / directory_payload.name
+                    if not expected_root.is_file():
+                        raise AssertionError("Decrypted file not found for directory payload")
+                    if load_bytes(expected_root) != load_bytes(directory_payload):
+                        raise AssertionError("Decrypted file mismatch for directory payload")
 
             print(
                 f"[OK] directory payload '{directory_payload.name}' round-trip verified"
@@ -503,6 +562,11 @@ def main(argv: Sequence[str]) -> int:
         type=Path,
         help="Optional directory payload to validate (default: skip directory test)",
     )
+    parser.add_argument(
+        "--rust",
+        action="store_true",
+        help="Test Rust version instead of C version (round-trip only, no deterministic comparison)",
+    )
 
     args = parser.parse_args(argv)
 
@@ -523,7 +587,7 @@ def main(argv: Sequence[str]) -> int:
 
     repo_root = Path(__file__).resolve().parents[1]
     compression = os.environ.get("ENCRYPTO_TEST_COMPRESSION")
-    execute_tests(repo_root, sizes, compression, args.directory)
+    execute_tests(repo_root, sizes, compression, args.directory, rust_mode=args.rust)
     return 0
 
 

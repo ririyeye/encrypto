@@ -1,0 +1,59 @@
+[package]
+name = "encrypto"
+version = "0.1.0"
+edition = "2021"
+authors = ["encrypto team"]
+description = "Hybrid RSA-OAEP + AES-GCM encryption CLI tools"
+license = "MIT"
+
+[lib]
+name = "encrypto"
+path = "src/lib.rs"
+
+[[bin]]
+name = "enc"
+path = "src/bin/enc.rs"
+
+[[bin]]
+name = "dec"
+path = "src/bin/dec.rs"
+
+[dependencies]
+# RSA encryption
+rsa = { version = "0.9", features = ["sha2"] }
+
+# AES-GCM encryption
+aes-gcm = { version = "0.10", features = ["aes"] }
+
+# SHA-2 hash functions
+sha2 = "0.10"
+
+# Random number generation
+rand = "0.8"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Tar archive support
+tar = "0.4"
+
+# Compression support
+flate2 = "1.0"           # gzip
+zstd = "0.13"            # zstd
+lz4_flex = "0.11"        # lz4
+
+# For secure memory handling
+zeroize = { version = "1.7", features = ["derive"] }
+
+# Build script dependencies for key embedding
+[build-dependencies]
+rsa = { version = "0.9", features = ["sha2"] }
+rand = "0.8"
+hex = "0.4"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = "z"
+strip = true

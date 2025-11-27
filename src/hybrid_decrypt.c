@@ -176,7 +176,6 @@ typedef enum compression_algorithm {
     COMPRESSION_GZIP    = 1,
     COMPRESSION_ZSTD    = 2,
     COMPRESSION_LZ4     = 3,
-    COMPRESSION_LZOP    = 4,
     COMPRESSION_INVALID = 255
 } compression_algorithm;
 
@@ -191,8 +190,6 @@ static const char* compression_algorithm_name(compression_algorithm algo)
         return "zstd";
     case COMPRESSION_LZ4:
         return "lz4";
-    case COMPRESSION_LZOP:
-        return "lzop";
     default:
         return "invalid";
     }
@@ -209,8 +206,6 @@ static compression_algorithm compression_algorithm_from_id(unsigned int id)
         return COMPRESSION_ZSTD;
     case 3:
         return COMPRESSION_LZ4;
-    case 4:
-        return COMPRESSION_LZOP;
     default:
         return COMPRESSION_INVALID;
     }
@@ -787,9 +782,6 @@ static int enable_reader_filter(struct archive* reader, compression_algorithm al
         break;
     case COMPRESSION_LZ4:
         r = archive_read_support_filter_lz4(reader);
-        break;
-    case COMPRESSION_LZOP:
-        r = archive_read_support_filter_lzop(reader);
         break;
     default:
         return -1;

@@ -9,3 +9,6 @@ install
 *.bin
 *.pyc
 tmp
+rust/target
+rust/Cargo.lock
+*.pem

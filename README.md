@@ -9,11 +9,12 @@
 - 安装 [xmake](https://xmake.io/)。
 - 准备可运行仓库脚本的 Python 环境，并安装 [PyCryptodome](https://pycryptodome.readthedocs.io/)；如使用虚拟环境，请先激活。
 - 密钥生成完全由 PyCryptodome 负责，无需安装额外的 `openssl` 可执行文件。
-- 依赖 [libarchive](https://www.libarchive.org/) 及其 filter 支持；项目默认拉取的静态依赖已包含 `zstd`/`lz4`/`lzop` 等算法，若改用系统库，请确保开发包齐全。
+- 依赖 [libarchive](https://www.libarchive.org/) 及其 filter 支持；项目默认拉取的静态依赖已包含 `zstd`/`lz4` 等算法，若改用系统库，请确保开发包齐全。
 
 ```bash
 python -m pip install pycryptodome
 ```
+
 ## 构建
 
 执行下列任意命令都会触发自定义 `generate_keys` 规则，从而调用 `scripts/generate_keys.py` 利用 PyCryptodome 生成 PEM 与 `build/generated/` 下的 `rsa_private_key.h`、`rsa_public_key.h`（头文件内嵌 DER 字节流，便于避免二进制中出现 PEM 文本标记）：
@@ -31,7 +32,7 @@ xmake build enc
 
 - `enc <input> <output>`：输入既可以是常规文件，也可以是目录。目录会先按固定顺序打包为 `tar`，再按所选算法压缩后进入 AES-GCM/RSA 混合加密流程。输出路径可为文件或 `-`（标准输出），以便串联到其他工具。
 - `dec <input|-> <output_dir>`：校验并解密混合容器，依据头部记录的算法还原压缩流并自动展开 `tar` 内容。`output_dir` 必须为尚不存在的目录名，命令会在其中恢复原始的文件/目录结构。
-- 通过环境变量 `ENCRYPTO_COMPRESSION` 选择打包阶段的压缩算法：支持 `lz4`（默认）、`gzip`、`zstd`、`lzop` 以及 `none`（仅打包为裸 `tar`）。`dec` 会从容器头部识别算法并自动匹配，因此无需额外参数；头部缺省值兼容旧版仅含 `gzip` 的容器。
+- 通过环境变量 `ENCRYPTO_COMPRESSION` 选择打包阶段的压缩算法：支持 `lz4`（默认）、`gzip`、`zstd` 以及 `none`（仅打包为裸 `tar`）。`dec` 会从容器头部识别算法并自动匹配，因此无需额外参数；头部缺省值兼容旧版仅含 `gzip` 的容器。
 
 ## 测试
 
@@ -61,7 +62,7 @@ python scripts/test_rsa_cli.py --directory src  # 额外验证目录 round-trip
 | --- | --- | --- | --- |
 | Magic | 0-3 字节 | ASCII `ENHY` | 固定魔数，标识混合容器 |
 | Version | 第 4 字节 | `uint8` | 当前版本为 2；值为 1 时表示旧格式（默认 `gzip`） |
-| Compression | 第 5 字节 | `uint8` | 压缩算法：0=`none`，1=`gzip`，2=`zstd`，3=`lz4`，4=`lzop` |
+| Compression | 第 5 字节 | `uint8` | 压缩算法：0=`none`，1=`gzip`，2=`zstd`，3=`lz4` |
 | RSA 密文长度 | 第 6-7 字节 | `uint16` 大端 | RSA OAEP 密文长度，应等于 `mbedtls_rsa_get_len` |
 | IV 长度 | 第 8 字节 | `uint8` | AES-GCM IV 长度，当前固定为 12 |
 | Tag 长度 | 第 9 字节 | `uint8` | AES-GCM Tag 长度，当前固定为 16 |
@@ -75,3 +76,17 @@ AES-GCM 固定使用 32 字节会话密钥、12 字节 IV、16 字节 Tag，并�
 - `scripts/`：密钥生成与端到端测试脚本。
 - `build/generated/`：构建时生成的密钥头文件（自动维护）。
 - `install/bin/`：`xmake install` 产出的可执行文件。
+- `rust/`：Rust 版本实现（详见 [rust/README.md](rust/README.md)）。
+
+## Rust 版本
+
+本项目提供完整的 Rust 实现，位于 `rust/` 目录。Rust 版本与 C 版本功能完全兼容，使用相同的容器格式。
+
+```bash
+cd rust
+cargo build --release
+./target/release/enc input.txt output.bin
+./target/release/dec output.bin output_dir
+```
+
+详细文档请参阅 [rust/README.md](rust/README.md)。
