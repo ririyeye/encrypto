@@ -1,14 +1,19 @@
-.xmake
-build
-old-rule
+# Rust/Cargo
+target/
+Cargo.lock
+
+# IDE and editor
 .cache
-compile_commands.json
 .vscode
-install
-.github
+.idea
+
+# Build artifacts
 *.bin
-*.pyc
-tmp
-rust/target
-rust/Cargo.lock
 *.pem
+
+# Python
+*.pyc
+__pycache__/
+
+# Temporary files
+tmp/
