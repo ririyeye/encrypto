@@ -3,14 +3,25 @@
 //! Drag and drop files or directories onto this program to encrypt them
 //! and copy the base64-encoded result to the clipboard.
 
-#![windows_subsystem = "windows"]
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
+#[cfg(not(windows))]
+fn main() {
+    eprintln!("此程序仅支持 Windows 平台。");
+    std::process::exit(1);
+}
+
+#[cfg(windows)]
 use std::env;
+#[cfg(windows)]
 use std::io::Cursor;
+#[cfg(windows)]
 use std::path::Path;
 
+#[cfg(windows)]
 use encrypto::{crypto, CompressionAlgorithm};
 
+#[cfg(windows)]
 fn main() {
     // Get dropped file/directory from command line arguments
     let args: Vec<String> = env::args().collect();
@@ -64,6 +75,7 @@ fn main() {
 }
 
 /// Encrypt a file or directory and copy the base64-encoded result to clipboard.
+#[cfg(windows)]
 fn encrypt_to_clipboard(input_path: &Path) -> Result<usize, Box<dyn std::error::Error>> {
     // Get compression algorithm from environment (default to lz4)
     let compression = CompressionAlgorithm::from_env().unwrap_or(CompressionAlgorithm::Lz4);
@@ -107,6 +119,7 @@ fn encrypt_to_clipboard(input_path: &Path) -> Result<usize, Box<dyn std::error::
 }
 
 /// Base64 encode bytes.
+#[cfg(windows)]
 fn base64_encode(data: &[u8]) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -137,6 +150,7 @@ fn base64_encode(data: &[u8]) -> String {
 }
 
 /// Set text to clipboard using Windows API.
+#[cfg(windows)]
 fn set_clipboard_text(text: &str) -> Result<(), Box<dyn std::error::Error>> {
     use std::ptr;
 
@@ -201,6 +215,7 @@ fn set_clipboard_text(text: &str) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Show a Windows message box.
+#[cfg(windows)]
 fn show_message(title: &str, message: &str, is_error: bool) {
     use std::ptr;
 

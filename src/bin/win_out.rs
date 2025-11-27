@@ -3,20 +3,34 @@
 //! This program monitors the clipboard for encrypted data (base64-encoded)
 //! and automatically decrypts it to the desktop.
 
-#![windows_subsystem = "windows"]
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
+#[cfg(not(windows))]
+fn main() {
+    eprintln!("此程序仅支持 Windows 平台。");
+    std::process::exit(1);
+}
+
+#[cfg(windows)]
 use std::io::Cursor;
+#[cfg(windows)]
 use std::path::PathBuf;
+#[cfg(windows)]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(windows)]
 use std::sync::Arc;
+#[cfg(windows)]
 use std::time::Duration;
 
+#[cfg(windows)]
 use encrypto::crypto;
 
 /// Magic bytes that identify our encrypted format after base64 decode.
 /// The RSA-encrypted header starts with specific patterns.
+#[cfg(windows)]
 const POLL_INTERVAL_MS: u64 = 500;
 
+#[cfg(windows)]
 fn main() {
     // Create stop flag for clean shutdown
     let running = Arc::new(AtomicBool::new(true));
@@ -67,6 +81,7 @@ fn main() {
 /// Returns None if the data doesn't look like our encrypted format.
 /// Returns Some(Ok(path)) if decryption succeeded.
 /// Returns Some(Err(e)) if it looked like our data but decryption failed.
+#[cfg(windows)]
 fn try_decrypt_clipboard(text: &str) -> Option<Result<PathBuf, Box<dyn std::error::Error>>> {
     // Quick checks to filter out obviously non-encrypted data
     let trimmed = text.trim();
@@ -107,6 +122,7 @@ fn try_decrypt_clipboard(text: &str) -> Option<Result<PathBuf, Box<dyn std::erro
 
 /// Check if decoded data looks like our encrypted format.
 /// We can't fully validate without decryption, but we can do basic size checks.
+#[cfg(windows)]
 fn looks_like_encrypted_data(data: &[u8]) -> bool {
     // RSA 4096 = 512 bytes per block
     // Minimum structure: header_block(512) + key_block(512) + iv(12) + ciphertext(1+) + tag(16)
@@ -133,6 +149,7 @@ fn looks_like_encrypted_data(data: &[u8]) -> bool {
 }
 
 /// Check if a string looks like base64 data.
+#[cfg(windows)]
 fn is_likely_base64(s: &str) -> bool {
     // Must be mostly alphanumeric, +, /, or =
     let valid_chars = s
@@ -152,6 +169,7 @@ fn is_likely_base64(s: &str) -> bool {
 }
 
 /// Decrypt data and extract to desktop.
+#[cfg(windows)]
 fn decrypt_to_desktop(encrypted_data: &[u8]) -> Result<PathBuf, Box<dyn std::error::Error>> {
     // Validate minimum size before attempting decryption
     // RSA 4096 = 512 bytes, minimum = 2 blocks + iv + tag = 1024 + 12 + 16 = 1052
@@ -194,6 +212,7 @@ fn decrypt_to_desktop(encrypted_data: &[u8]) -> Result<PathBuf, Box<dyn std::err
 }
 
 /// Get the root name from a tar archive.
+#[cfg(windows)]
 fn get_tar_root_name(tar_data: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
     let mut archive = tar::Archive::new(Cursor::new(tar_data));
 
@@ -221,6 +240,7 @@ fn get_tar_root_name(tar_data: &[u8]) -> Result<String, Box<dyn std::error::Erro
 }
 
 /// Extract tar archive to directory.
+#[cfg(windows)]
 fn extract_tar_to_dir(tar_data: &[u8], output_dir: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     // First pass: determine structure
     let mut first_archive = tar::Archive::new(Cursor::new(tar_data));
@@ -304,6 +324,7 @@ fn extract_tar_to_dir(tar_data: &[u8], output_dir: &PathBuf) -> Result<(), Box<d
 }
 
 /// Check if a path is safe.
+#[cfg(windows)]
 fn is_safe_relative_path(path: &str) -> bool {
     if path.is_empty() {
         return false;
@@ -329,6 +350,7 @@ fn is_safe_relative_path(path: &str) -> bool {
 }
 
 /// Get the desktop path.
+#[cfg(windows)]
 fn get_desktop_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
     // Try USERPROFILE environment variable
     if let Ok(profile) = std::env::var("USERPROFILE") {
@@ -351,6 +373,7 @@ fn get_desktop_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
 }
 
 /// Ensure a path is unique by adding suffix if needed.
+#[cfg(windows)]
 fn ensure_unique_path(path: PathBuf) -> PathBuf {
     if !path.exists() {
         return path;
@@ -369,6 +392,7 @@ fn ensure_unique_path(path: PathBuf) -> PathBuf {
 }
 
 /// Simple hash function for detecting clipboard changes.
+#[cfg(windows)]
 fn simple_hash(s: &str) -> u64 {
     let mut hash: u64 = 5381;
     for byte in s.bytes() {
@@ -378,6 +402,7 @@ fn simple_hash(s: &str) -> u64 {
 }
 
 /// Base64 decode.
+#[cfg(windows)]
 fn base64_decode(input: &str) -> Result<Vec<u8>, &'static str> {
     const DECODE_TABLE: [i8; 256] = {
         let mut table = [-1i8; 256];
@@ -437,6 +462,7 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, &'static str> {
 }
 
 /// Get text from clipboard using Windows API.
+#[cfg(windows)]
 fn get_clipboard_text() -> Result<String, Box<dyn std::error::Error>> {
     use std::ptr;
 
@@ -499,6 +525,7 @@ fn get_clipboard_text() -> Result<String, Box<dyn std::error::Error>> {
 }
 
 /// Show a Windows notification (toast or message box).
+#[cfg(windows)]
 fn show_notification(title: &str, message: &str) {
     use std::ptr;
 
