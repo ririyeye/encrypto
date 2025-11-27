@@ -18,6 +18,14 @@ path = "src/bin/enc.rs"
 name = "dec"
 path = "src/bin/dec.rs"
 
+[[bin]]
+name = "win-in"
+path = "src/bin/win_in.rs"
+
+[[bin]]
+name = "win-out"
+path = "src/bin/win_out.rs"
+
 [dependencies]
 # RSA encryption
 rsa = { version = "0.9", features = ["sha2"] }
