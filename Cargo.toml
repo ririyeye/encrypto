@@ -50,12 +50,12 @@ thiserror = "1.0"
 tar = "0.4"
 
 # Compression support
-flate2 = "1.0"           # gzip
+flate2 = "1.1"           # gzip
 zstd = "0.13"            # zstd
 lz4_flex = "0.11"        # lz4
 
 # For secure memory handling
-zeroize = { version = "1.7", features = ["derive"] }
+zeroize = { version = "1.8", features = ["derive"] }
 
 # Build script dependencies for key embedding
 [build-dependencies]

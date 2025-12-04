@@ -1,0 +1,8 @@
+# 为 x86_64 Linux 默认使用 musl 静态链接
+[target.x86_64-unknown-linux-gnu]
+# 当在 x86_64-unknown-linux-gnu 系统上编译时，自动切换到 musl
+# rustflags = ["-C", "target-feature=+crt-static"]
+
+[build]
+# 默认编译目标：musl 静态链接
+target = "x86_64-unknown-linux-musl"
